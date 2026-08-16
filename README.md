@@ -94,15 +94,18 @@ sensors (at least one sensor needs to be specified):
 * sensor_out (Optional): entity_id for a outdoor temperature sensor, sensor_out.state must be temperature (float). Only required when running weather mode. No filtering possible.
 
 * initial_hvac_mode (Optional): Set the initial operation mode. Valid values are 'off', 'cool' or 'heat'. Default = off
-* initial_preset_mode (Optional): Set the default mode. Default is normal operational mode. Allowed alternative is any in 'extra_presets'. The 'inital_preset_mode' needs to be present in the 'extra_presets' of the 'initial_hvac_mode'
+* initial_preset_mode (Optional): Set the default mode. Default is normal operational mode (`none`). Built-in alternatives: `summer`, `emergency`. Custom names from `extra_presets` are also allowed and must exist under the `initial_hvac_mode` HVAC block.
 
 * precision (Optional): specifiy setpoint precision: 0.1, 0.5 or 1
 * detailed_output (Optional): include detailed control output including PID contributions and sub-control (PWM) output. To include detailed output use 'True'. Use this option limited for debugging and tuning only as it increases the database size. Default = False
 
 checks for sensor and switch:
 * sensor_stale_duration (Optional): safety routine "emergency mode" to turn switches off when sensor has not updated for a specified time period. Specify time period. Activation of emergency mode is visible via a forced climate preset state. Default is not activated. 
-* passive_switch_check (Optional): Include check of the switch to time it was operated for a secified time ('passive_switch_duration' per hvac_mode defined) to avoid stuck/jammed valve. Per hvac_mode the duration (where switch is specified) is specified and optionally the time when to check. When in master-satellite mode the switch is only activated when master is idle or off. Specify 'True' to activate. Default is False (not activated).
-* passive_switch_check_time (Optional): specify the time to perform the check. Default 02:00 AM. Input format HH:MM'
+* passive_switch_check (Optional): Enable stuck-valve / anti-calc checks. Idle time is `passive_switch_duration` per HVAC mode. Default = False.
+* passive_switch_check_time (Optional): Time of day to run the check. Default 02:00. Format HH:MM.
+  - Stand-alone satellite: each thermostat flushes its own valve at this time.
+  - Master (HVAC heat/cool): the master builds a queue of idle satellites and flushes them **one after another**. Satellites under master control do not run their own daily check; their `passive_switch_check_time` is only used when the master is `off` (stand-alone fallback).
+  - PWM heating of other rooms continues during a flush. The flushed valve is protected (`stuck_loop` / `anti_calc_active`) so PWM cannot close it early.
 
 recovery of settings
 * restore_from_old_state (Optional): restore certain old configuration and modes after restart. Specify 'True' to activate. (setpoints, KP,KI,PD values, modes). Default = False
@@ -120,10 +123,15 @@ Generic HVAC mode setting:
 * min_target_temp (Optional): Lower limit temperature setpoint. Default heat=14, cool=20
 * max_target_temp (Optional): Upper limit temperature setpoint. Default for heat=24, cool=35
 * initial_target_temp (Optional): Initial setpoint at start. Default for heat=19, cool=28
-* extra_presets (Optional): A list of custom presets. Needs to be in to form of a list of name and value. Defining 'extra_presets' will make away preset available. default no preset mode available. 
+* extra_presets (Optional): A list of custom presets. Needs to be in to form of a list of name and value. Defining 'extra_presets' will make away preset available. default no preset mode available. Built-in presets `none`, `summer` and `emergency` do not need to be listed here.
 
-* passive_switch_duration (Optional): specifiy per switch the maximum time before forcing toggle to avoid jammed valve. Specify a time period. Default is not activated.
-* passive_switch_opening_time (Optional): specify the minium opening time of valve when running passive switch operation. Specify a time period. Default 1 minute.
+* passive_switch_duration (Optional): Maximum idle time before a valve is flushed. Specify a time period. Default is not activated.
+  - Satellite (stand-alone): applies to that valve.
+  - Master: idle threshold used when selecting which satellites to flush. The master's own switch (often an `input_boolean`) is **not** toggled for anti-calc.
+* passive_switch_opening_time (Optional): How long to keep the valve open during a flush. Default 1 minute.
+  - Satellite: duration of that valve's flush (also used by `stuck_prevention` on the satellite).
+  - Master: delay before starting the **next** satellite (`opening_time + gap`). Keep this equal to the satellite opening time so flushes do not overlap unless `gap` is negative.
+* passive_switch_gap (Optional): Extra delay between sequential master flushes, added to `passive_switch_opening_time`. Default 0. May be negative (overlap / thermal actuator lag). Must not be smaller than `-passive_switch_opening_time` (that value starts all due circuits at once).
 
 
 #### on-off mode (Optional) (sub of hvac mode)
@@ -224,6 +232,15 @@ The master will check satellite states and group them in on-off and proportional
 
 The preset mode changes on the master will be synced to the satellites.
 
+Built-in preset `summer` (HVAC mode stays `heat` or `cool`): no heat request to satellite valves or the master switch, PID is frozen, anti-calc still runs. Use this for the heating-off season. Master HVAC `off` is unchanged: satellites return to stand-alone control.
+
+Master attributes during a coordinated flush:
+* `anti_calc_active` (bool)
+* `anti_calc_satellite` (current room / climate object id)
+* `anti_calc_queue` (remaining rooms)
+
+Satellites expose `anti_calc_active` as well (true while that valve's `stuck_loop` flush is running, including stand-alone).
+
 The master can operate in 'minimal_on', 'balanced' or 'continuous' mode. This will determine the satellite timing scheduling. For the minimal_on mode the master valve is opened as short as possible, for balanced mode the opening time is balanced between heating power and duration and for continuous mode the valve opening time is extended as long as possible. All satellite valves operating as on-off switch are used for the nesting are scheduled in time to get a balanced heat requirement. In 'continuous' mode the satellite timing is scheduled aimed such that a continuous heat requirement is created. The master valve will be opened continuous when sufficient heat is needed. In low demand conditions an on-off mode is maintained. 
 
 The controller is called periodically and specified by control_interval.
@@ -257,11 +274,12 @@ logger:
     multizone_thermostat: debug
 ```    
 # Services callable from HA:
-Several services are included to change the active configuration of a satellite or master. 
-## set_mid_diff:
-Change the 'minimal_diff'
+Several services are included to change the active configuration of a satellite or master.
+Preset `summer` can also be set with the standard Home Assistant service `climate.set_preset_mode`.
+## set_mid_diff / pwm_threshold:
+Change the 'minimal_diff' / PWM threshold before the switch is operated
 ## set_preset_mode:
-Change the 'preset'
+Change the preset (`none`, `summer`, `emergency`, or a name from `extra_presets`)
 ## set_pid:
 Change the current kp, ki, kd values of the PID or Valve PID controller
 ## set_integral:
@@ -272,3 +290,5 @@ Change the ka and kb for the weather controller
 change the UKF filter level for the temperature sensor
 ## detailed_output:
 Control the attribute output for PID-, WC-contributions and control output
+## stuck_prevention:
+Open a satellite valve briefly to prevent sticking (anti-calc). On the master this starts the sequential satellite flush. Optional `force: true` on the master ignores the idle timer and queues all satellites that are not currently heating.
