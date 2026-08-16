@@ -94,7 +94,7 @@ sensors (at least one sensor needs to be specified):
 * sensor_out (Optional): entity_id for a outdoor temperature sensor, sensor_out.state must be temperature (float). Only required when running weather mode. No filtering possible.
 
 * initial_hvac_mode (Optional): Set the initial operation mode. Valid values are 'off', 'cool' or 'heat'. Default = off
-* initial_preset_mode (Optional): Set the default mode. Default is normal operational mode (`none`). Built-in alternatives: `summer`, `emergency`. Custom names from `extra_presets` are also allowed and must exist under the `initial_hvac_mode` HVAC block.
+* initial_preset_mode (Optional): Set the default mode. Default is normal operational mode (`none`). Built-in alternatives: `standby`, `emergency`. Custom names from `extra_presets` are also allowed and must exist under the `initial_hvac_mode` HVAC block.
 
 * precision (Optional): specifiy setpoint precision: 0.1, 0.5 or 1
 * detailed_output (Optional): include detailed control output including PID contributions and sub-control (PWM) output. To include detailed output use 'True'. Use this option limited for debugging and tuning only as it increases the database size. Default = False
@@ -123,7 +123,7 @@ Generic HVAC mode setting:
 * min_target_temp (Optional): Lower limit temperature setpoint. Default heat=14, cool=20
 * max_target_temp (Optional): Upper limit temperature setpoint. Default for heat=24, cool=35
 * initial_target_temp (Optional): Initial setpoint at start. Default for heat=19, cool=28
-* extra_presets (Optional): A list of custom presets. Needs to be in to form of a list of name and value. Defining 'extra_presets' will make away preset available. default no preset mode available. Built-in presets `none`, `summer` and `emergency` do not need to be listed here.
+* extra_presets (Optional): A list of custom presets. Needs to be in to form of a list of name and value. Defining 'extra_presets' will make away preset available. default no preset mode available. Built-in presets `none`, `standby` and `emergency` do not need to be listed here.
 
 * passive_switch_duration (Optional): Maximum idle time before a valve is flushed. Specify a time period. Default is not activated.
   - Satellite (stand-alone): applies to that valve.
@@ -232,7 +232,7 @@ The master will check satellite states and group them in on-off and proportional
 
 The preset mode changes on the master will be synced to the satellites.
 
-Built-in preset `summer` (HVAC mode stays `heat` or `cool`): no heat request to satellite valves or the master switch, PID is frozen, anti-calc still runs. Use this for the heating-off season. Master HVAC `off` is unchanged: satellites return to stand-alone control.
+Built-in preset `standby` (HVAC mode stays `heat` or `cool`): no heat or cool request to satellite valves or the master switch, PID is frozen, anti-calc still runs. Use this when the plant is not in climate service (e.g. DHW-only). Master HVAC `off` is unchanged: satellites return to stand-alone control.
 
 Master attributes during a coordinated flush:
 * `anti_calc_active` (bool)
@@ -275,11 +275,11 @@ logger:
 ```    
 # Services callable from HA:
 Several services are included to change the active configuration of a satellite or master.
-Preset `summer` can also be set with the standard Home Assistant service `climate.set_preset_mode`.
+Preset `standby` can also be set with the standard Home Assistant service `climate.set_preset_mode`.
 ## set_mid_diff / pwm_threshold:
 Change the 'minimal_diff' / PWM threshold before the switch is operated
 ## set_preset_mode:
-Change the preset (`none`, `summer`, `emergency`, or a name from `extra_presets`)
+Change the preset (`none`, `standby`, `emergency`, or a name from `extra_presets`)
 ## set_pid:
 Change the current kp, ki, kd values of the PID or Valve PID controller
 ## set_integral:

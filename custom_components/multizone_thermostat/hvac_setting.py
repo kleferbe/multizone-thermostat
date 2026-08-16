@@ -69,7 +69,7 @@ from .const import (
     PID_CONTROLLER,
     PRESET_EMERGENCY,
     PRESET_RESTORE,
-    PRESET_SUMMER,
+    PRESET_STANDBY,
     PWM_UPDATE_CHANGE,
     OperationMode,
 )
@@ -379,7 +379,7 @@ class HVACSetting:
         return self._control_output
 
     def reset_control_output(self) -> None:
-        """Clear PWM output so summer/idle does not keep a heat request."""
+        """Clear PWM output so standby does not keep a heat or cool request."""
         self._time_offset = 0
         self._control_output = {
             ATTR_CONTROL_OFFSET: 0,
@@ -464,7 +464,7 @@ class HVACSetting:
         if not self.is_hvac_master_mode and mode not in [
             PRESET_EMERGENCY,
             PRESET_RESTORE,
-            PRESET_SUMMER,
+            PRESET_STANDBY,
         ]:
             # switch to custom preset and save old set point
             if self._preset_mode == PRESET_NONE and mode in self.custom_presets:
