@@ -108,6 +108,7 @@ from .const import (
     NO_SWITCH_MODE,
     PRESET_EMERGENCY,
     PRESET_RESTORE,
+    PRESET_SUMMER,
     PWM_LAG,
     SAT_CONTROL_LEAD,
     SERVICE_SET_VALUE,
@@ -1523,6 +1524,14 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 self._logger.debug("Controller cancelled due to 'emergency mode'")
                 return
 
+            if self.preset_mode == PRESET_SUMMER:
+                self._logger.debug("Controller skipped: summer preset")
+                if self._hvac_on:
+                    self._hvac_on.reset_control_output()
+                    self.control_output = self._hvac_on.get_control_output
+                self.hass.async_create_task(self._async_controller_pwm(force=True))
+                return
+
             # routine should not be called when thermostat is off
             if not self._hvac_on:
                 self._logger.warning(
@@ -1631,11 +1640,12 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 self._logger.debug("PWM skipped: stuck_loop active")
                 return
 
-            # keep off in emergency or pwm = 0
+            # keep off in emergency, summer or pwm = 0
             if (
                 self.control_output[ATTR_CONTROL_PWM_OUTPUT] in [None, 0]
                 or self._hvac_on is None
                 or self.preset_mode == PRESET_EMERGENCY
+                or self.preset_mode == PRESET_SUMMER
             ):
                 self._async_cancel_pwm_routines()
             # determine switch on-off or valve position
@@ -2317,12 +2327,30 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
 
         if self._hvac_on:
             self._logger.debug("Set preset mode to '%s'", preset_mode)
+            old_preset = self.preset_mode
             self._hvac_on.preset_mode = preset_mode
             self._preset_mode = self._hvac_on.preset_mode
             # update satellites
             if self.is_master:
-                await self._async_set_satelite_preset(preset_mode)
-            # update thermostat controller when thermostat operating on itself
+                await self._async_set_satelite_preset(self._preset_mode)
+            if (
+                self._preset_mode == PRESET_SUMMER
+                and old_preset != PRESET_SUMMER
+            ):
+                self._hvac_on.reset_control_output()
+                self.control_output = self._hvac_on.get_control_output
+                self._async_cancel_pwm_routines()
+            elif (
+                old_preset == PRESET_SUMMER
+                and self._preset_mode not in (PRESET_SUMMER, PRESET_EMERGENCY)
+            ):
+                if self._hvac_on.is_prop_pid_mode:
+                    self._hvac_on.pid_reset_time()
+                if (
+                    self.is_master
+                    or self._self_controlled == OperationMode.SELF
+                ):
+                    await self._async_controller(force=True)
             elif (
                 self.preset_mode != PRESET_EMERGENCY
                 and self._self_controlled == OperationMode.SELF
@@ -2539,7 +2567,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
 
         _, _hvac_on, _ = self.get_hvac_data(hvac_mode)
 
-        modes = [PRESET_NONE, PRESET_EMERGENCY]
+        modes = [PRESET_NONE, PRESET_SUMMER, PRESET_EMERGENCY]
         if _hvac_on is not None:
             if _hvac_on.custom_presets or self.is_master:
                 modes = modes + list(_hvac_on.custom_presets.keys())

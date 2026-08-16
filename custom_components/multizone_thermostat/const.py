@@ -74,6 +74,7 @@ ATTR_ANTI_CALC_QUEUE = "anti_calc_queue"
 
 PRESET_EMERGENCY = "emergency"
 PRESET_RESTORE = "restore"
+PRESET_SUMMER = "summer"
 
 # only required for hvac_settings
 CONF_TARGET_TEMP_INIT = "initial_target_temp"

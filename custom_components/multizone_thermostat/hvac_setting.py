@@ -69,6 +69,7 @@ from .const import (
     PID_CONTROLLER,
     PRESET_EMERGENCY,
     PRESET_RESTORE,
+    PRESET_SUMMER,
     PWM_UPDATE_CHANGE,
     OperationMode,
 )
@@ -377,6 +378,14 @@ class HVACSetting:
         """Return the control output (offset and valve pos) of the thermostat."""
         return self._control_output
 
+    def reset_control_output(self) -> None:
+        """Clear PWM output so summer/idle does not keep a heat request."""
+        self._time_offset = 0
+        self._control_output = {
+            ATTR_CONTROL_OFFSET: 0,
+            ATTR_CONTROL_PWM_OUTPUT: 0,
+        }
+
     @property
     def time_offset(self) -> float:
         """Get minimum pwm range."""
@@ -455,6 +464,7 @@ class HVACSetting:
         if not self.is_hvac_master_mode and mode not in [
             PRESET_EMERGENCY,
             PRESET_RESTORE,
+            PRESET_SUMMER,
         ]:
             # switch to custom preset and save old set point
             if self._preset_mode == PRESET_NONE and mode in self.custom_presets:
