@@ -132,3 +132,11 @@ detailed_output:
       description: Include detailed output
       example: True or False
 
+stuck_prevention:
+  name: Stuck prevention (anti-calc)
+  description: Open the valve briefly to prevent sticking. PWM will not close it while stuck_loop is active.
+  fields:
+    entity_id:
+      description: Thermostat entity_id (use a satellite, not the master)
+      example: climate.heizung_kuche
+

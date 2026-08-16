@@ -97,3 +97,9 @@ def register_services(custom_presets):
         },
         "async_set_satelite_mode",
     )
+
+    platform.async_register_entity_service(  # type: ignore
+        "stuck_prevention",
+        {},
+        "async_run_stuck_prevention",
+    )
