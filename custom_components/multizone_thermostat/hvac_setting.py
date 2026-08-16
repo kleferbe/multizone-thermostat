@@ -48,6 +48,7 @@ from .const import (
     CONF_MIN_VALVE,
     CONF_ON_OFF_MODE,
     CONF_PASSIVE_SWITCH_DURATION,
+    CONF_PASSIVE_SWITCH_GAP,
     CONF_PASSIVE_SWITCH_OPEN_TIME,
     CONF_PID_MODE,
     CONF_PROPORTIONAL_MODE,
@@ -529,6 +530,13 @@ class HVACSetting:
     def get_switch_stale_open_time(self) -> datetime.datetime:
         """Return the switch max passive duration."""
         return self._hvac_settings.get(CONF_PASSIVE_SWITCH_OPEN_TIME)
+
+    @property
+    def get_switch_stale_gap(self) -> datetime.timedelta:
+        """Return delay between sequential anti-calc flushes."""
+        return self._hvac_settings.get(
+            CONF_PASSIVE_SWITCH_GAP, datetime.timedelta(seconds=0)
+        )
 
     @property
     def stuck_loop(self) -> bool:

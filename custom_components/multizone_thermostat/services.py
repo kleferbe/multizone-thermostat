@@ -100,6 +100,8 @@ def register_services(custom_presets):
 
     platform.async_register_entity_service(  # type: ignore
         "stuck_prevention",
-        {},
+        {
+            vol.Optional("force", default=False): cv.boolean,
+        },
         "async_run_stuck_prevention",
     )

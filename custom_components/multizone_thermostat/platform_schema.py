@@ -42,6 +42,7 @@ from .const import (
     CONF_PASSIVE_CHECK_TIME,
     CONF_PASSIVE_SWITCH_CHECK,
     CONF_PASSIVE_SWITCH_DURATION,
+    CONF_PASSIVE_SWITCH_GAP,
     CONF_PASSIVE_SWITCH_OPEN_TIME,
     CONF_PID_MODE,
     CONF_PRECISION,
@@ -77,6 +78,7 @@ from .const import (
     DEFAULT_OPERATION,
     DEFAULT_PASSIVE_CHECK_TIME,
     DEFAULT_PASSIVE_SWITCH,
+    DEFAULT_PASSIVE_SWITCH_GAP,
     DEFAULT_PASSIVE_SWITCH_OPEN_TIME,
     DEFAULT_PWM,
     DEFAULT_PWM_RESOLUTION,
@@ -106,6 +108,9 @@ hvac_control_options = {
     vol.Optional(
         CONF_PASSIVE_SWITCH_OPEN_TIME, default=DEFAULT_PASSIVE_SWITCH_OPEN_TIME
     ): vol.All(cv.time_period, cv.positive_timedelta),
+    vol.Optional(
+        CONF_PASSIVE_SWITCH_GAP, default=DEFAULT_PASSIVE_SWITCH_GAP
+    ): cv.time_period,
     vol.Optional(CONF_EXTRA_PRESETS, default={}): vol.Schema(dict),
 }
 
@@ -281,4 +286,5 @@ PLATFORM_SCHEMA = vol.All(
         }
     ),
     val.validate_stuck_time(),
+    val.validate_passive_switch_gap(),
 )

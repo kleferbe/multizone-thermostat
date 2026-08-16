@@ -25,6 +25,7 @@ DEFAULT_MIN_VALVE_PWM = 0  # factor of master pwm
 # safety routines
 DEFAULT_PASSIVE_SWITCH = False
 DEFAULT_PASSIVE_SWITCH_OPEN_TIME = timedelta(seconds=60)
+DEFAULT_PASSIVE_SWITCH_GAP = timedelta(seconds=0)
 DEFAULT_PASSIVE_CHECK_TIME = "02:00"
 
 # restore old states
@@ -67,6 +68,9 @@ ATTR_EMERGENCY_MODE = "emergency mode"
 ATTR_UPDATE_NEEDED = "update satelite"
 ATTR_LAST_SWITCH_CHANGE = "switch_last_change"
 ATTR_STUCK_LOOP = "stuck_loop"
+ATTR_ANTI_CALC_ACTIVE = "anti_calc_active"
+ATTR_ANTI_CALC_SATELLITE = "anti_calc_satellite"
+ATTR_ANTI_CALC_QUEUE = "anti_calc_queue"
 
 PRESET_EMERGENCY = "emergency"
 PRESET_RESTORE = "restore"
@@ -87,6 +91,7 @@ CONF_EXTRA_PRESETS = "extra_presets"
 
 CONF_PASSIVE_SWITCH_DURATION = "passive_switch_duration"
 CONF_PASSIVE_SWITCH_OPEN_TIME = "passive_switch_opening_time"
+CONF_PASSIVE_SWITCH_GAP = "passive_switch_gap"
 CONF_PASSIVE_CHECK_TIME = "passive_switch_check_time"
 CONF_INCLUDE_VALVE_LAG = "compensate_valve_lag"
 

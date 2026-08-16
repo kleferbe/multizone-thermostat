@@ -134,9 +134,12 @@ detailed_output:
 
 stuck_prevention:
   name: Stuck prevention (anti-calc)
-  description: Open the valve briefly to prevent sticking. PWM will not close it while stuck_loop is active.
+  description: Open the valve briefly to prevent sticking. On the master this starts a sequential satellite flush. PWM will not close a satellite valve while stuck_loop is active.
   fields:
     entity_id:
-      description: Thermostat entity_id (use a satellite, not the master)
-      example: climate.heizung_kuche
+      description: Satellite to flush, or the master to start the coordinated sequence
+      example: climate.master
+    force:
+      description: On the master, flush all idle satellites regardless of last switch change
+      example: true
 

@@ -15,6 +15,8 @@ from .const import (
     CONF_MASTER_MODE,
     CONF_ON_OFF_MODE,
     CONF_PASSIVE_CHECK_TIME,
+    CONF_PASSIVE_SWITCH_GAP,
+    CONF_PASSIVE_SWITCH_OPEN_TIME,
     CONF_PID_MODE,
     CONF_PROPORTIONAL_MODE,
     CONF_PWM_DURATION,
@@ -23,6 +25,8 @@ from .const import (
     CONF_SENSOR_OUT,
     CONF_WC_MODE,
     CONF_WINDOW_OPEN_TEMPDROP,
+    DEFAULT_PASSIVE_SWITCH_GAP,
+    DEFAULT_PASSIVE_SWITCH_OPEN_TIME,
 )
 
 
@@ -217,5 +221,28 @@ def validate_stuck_time(*keys: str) -> Callable:
                 "Stuck switch check provided time %s not valid",
                 obj[CONF_PASSIVE_CHECK_TIME],
             )
+
+    return validate
+
+
+def validate_passive_switch_gap(*keys: str) -> Callable:
+    """Reject a gap smaller than minus the anti-calc opening time."""
+
+    def validate(obj: dict[str, Any]) -> dict[str, Any]:
+        """Check this condition."""
+        for hvac_mode in (HVACMode.HEAT, HVACMode.COOL):
+            conf = obj.get(hvac_mode)
+            if not conf:
+                continue
+            gap = conf.get(CONF_PASSIVE_SWITCH_GAP, DEFAULT_PASSIVE_SWITCH_GAP)
+            opening = conf.get(
+                CONF_PASSIVE_SWITCH_OPEN_TIME, DEFAULT_PASSIVE_SWITCH_OPEN_TIME
+            )
+            if gap < -opening:
+                raise vol.Invalid(
+                    f"{CONF_PASSIVE_SWITCH_GAP} ({gap}) must not be less than "
+                    f"-{CONF_PASSIVE_SWITCH_OPEN_TIME} ({opening})"
+                )
+        return obj
 
     return validate

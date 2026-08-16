@@ -68,6 +68,9 @@ from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 from . import DOMAIN, PLATFORMS, UKF_config, hvac_setting, services
 from .const import (
+    ATTR_ANTI_CALC_ACTIVE,
+    ATTR_ANTI_CALC_QUEUE,
+    ATTR_ANTI_CALC_SATELLITE,
     ATTR_CONTROL_MODE,
     ATTR_CONTROL_OFFSET,
     ATTR_CONTROL_OUTPUT,
@@ -77,6 +80,7 @@ from .const import (
     ATTR_EMERGENCY_MODE,
     ATTR_FILTER_MODE,
     ATTR_HVAC_DEFINITION,
+    ATTR_LAST_SWITCH_CHANGE,
     ATTR_SELF_CONTROLLED,
     ATTR_STUCK_LOOP,
     ATTR_VALUE,
@@ -267,6 +271,9 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         self._sat_id = 0
         self.control_output = {ATTR_CONTROL_OFFSET: 0, ATTR_CONTROL_PWM_OUTPUT: 0}
         self._self_controlled = OperationMode.SELF
+        self._anti_calc_queue: list[str] = []
+        self._anti_calc_current: str | None = None
+        self._anti_calc_unsub = None
 
         # check if it is master for Hvacmode.off
         self.is_master = False
@@ -497,6 +504,9 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 CONF_AREA: self._area,
                 ATTR_HVAC_DEFINITION: tmp_dict,
                 ATTR_EMERGENCY_MODE: self._emergency_stop,
+                ATTR_ANTI_CALC_ACTIVE: self.anti_calc_active,
+                ATTR_ANTI_CALC_SATELLITE: self._anti_calc_current,
+                ATTR_ANTI_CALC_QUEUE: list(self._anti_calc_queue),
             }
         # for satellite states
         else:
@@ -508,7 +518,15 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 ATTR_FILTER_MODE: self.filter_mode,
                 CONF_AREA: self._area,
                 ATTR_HVAC_DEFINITION: tmp_dict,
+                ATTR_ANTI_CALC_ACTIVE: self.anti_calc_active,
             }
+
+    @property
+    def anti_calc_active(self) -> bool:
+        """Return if an anti-calc flush is running on this entity."""
+        if self.is_master:
+            return bool(self._anti_calc_current or self._anti_calc_queue)
+        return any(data.stuck_loop for data in self._hvac_def.values())
 
     def set_detailed_output(self, hvac_mode: HVACMode, new_mode: bool) -> None:
         """Configure attribute output level."""
@@ -816,6 +834,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
 
                 # stop tracking satelites
                 if self.is_master:
+                    self._async_finish_anti_calc()
                     await self._async_routine_track_satelites()
                     satelite_reset = {sat: 0 for sat in self._hvac_on.get_satelites}
                     self._async_change_satelite_modes(
@@ -1107,18 +1126,13 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
     def _async_stuck_switch_check(self, now) -> None:
         """Check if the switch has not changed for a certain period and force operation to avoid stuck or jammed."""
 
-        # operated by master and check if currently active
-        if self._self_controlled != OperationMode.SELF:
-            master_mode = state_attr(
-                # self.hass, "climate." + self._self_controlled, "hvac_action"
-                self.hass,
-                "climate.master",
-                "hvac_action",
-            )
+        if self.is_master:
+            self.hass.async_create_task(self._async_start_master_anti_calc())
+            return
 
-            # cancel when master in operation
-            if master_mode in [HVACAction.HEATING, HVACAction.COOLING]:
-                return
+        # Master coordinates satellites that are under its control.
+        if self._self_controlled in (OperationMode.MASTER, OperationMode.PENDING):
+            return
 
         # check if thermostat is in operation
         if self._hvac_on and self._is_valve_open():
@@ -1955,10 +1969,189 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             _hvac_on.stuck_loop = False
             self.async_write_ha_state()
 
-    async def async_run_stuck_prevention(self) -> None:
+    def _async_cancel_anti_calc_schedule(self) -> None:
+        """Cancel a pending anti-calc sequence step."""
+        if self._anti_calc_unsub is not None:
+            self._anti_calc_unsub()
+            self._anti_calc_unsub = None
+
+    def _async_finish_anti_calc(self) -> None:
+        """Stop the master anti-calc sequence without closing satellite valves."""
+        self._async_cancel_anti_calc_schedule()
+        had_work = bool(self._anti_calc_current or self._anti_calc_queue)
+        self._anti_calc_queue = []
+        self._anti_calc_current = None
+        if had_work:
+            self._logger.info("anti-calc sequence finished")
+            self.async_write_ha_state()
+
+    def _parse_switch_last_change(self, value) -> datetime.datetime | None:
+        """Parse satellite switch_last_change from state attributes."""
+        if value is None:
+            return None
+        if isinstance(value, datetime.datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=datetime.UTC)
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=datetime.UTC)
+            return parsed
+        return None
+
+    def _async_schedule_anti_calc_next(self, delay_s: float) -> None:
+        """Schedule the next anti-calc step."""
+        self._async_cancel_anti_calc_schedule()
+        if delay_s <= 0:
+            self.hass.async_create_task(self._async_anti_calc_next())
+            return
+
+        async def _run(now: datetime.datetime) -> None:
+            self._anti_calc_unsub = None
+            await self._async_anti_calc_next()
+
+        self._anti_calc_unsub = async_track_point_in_utc_time(
+            self.hass,
+            _run,
+            datetime.datetime.fromtimestamp(time.time() + delay_s),
+        )
+
+    async def _async_start_master_anti_calc(self, force: bool = False) -> None:
+        """Build a satellite flush queue and start sequential anti-calc."""
+        if not self.is_master:
+            return
+
+        if self._anti_calc_current or self._anti_calc_queue:
+            self._logger.debug("anti-calc skipped: sequence already running")
+            return
+
+        if self.preset_mode == PRESET_EMERGENCY:
+            self._logger.warning("anti-calc skipped: emergency mode")
+            return
+
+        if self._hvac_mode not in HVAC_ACTIVE:
+            self._logger.debug("anti-calc skipped: master not in heat/cool")
+            return
+
+        hvac_on = self._hvac_on
+        if not hvac_on or not hvac_on.is_hvac_master_mode:
+            return
+
+        duration = hvac_on.get_switch_stale
+        if not force and not duration:
+            self._logger.warning(
+                "anti-calc skipped: set heat.passive_switch_duration on the master"
+            )
+            return
+
+        satelites = hvac_on.get_satelites or []
+        now = datetime.datetime.now(datetime.UTC)
+        queue: list[str] = []
+
+        for sat in satelites:
+            entity_id = "climate." + sat
+            state = self.hass.states.get(entity_id)
+            if not state or state.state in ERROR_STATE:
+                continue
+            if state.state != self._hvac_mode:
+                continue
+
+            if state.attributes.get(ATTR_PRESET_MODE) == PRESET_EMERGENCY:
+                continue
+
+            emergency = state.attributes.get(ATTR_EMERGENCY_MODE)
+            if emergency:
+                continue
+
+            self_ctrl = state.attributes.get(ATTR_SELF_CONTROLLED)
+            if self_ctrl == OperationMode.SELF:
+                continue
+
+            mode_def = (state.attributes.get(ATTR_HVAC_DEFINITION) or {}).get(
+                self._hvac_mode
+            ) or {}
+            if mode_def.get(ATTR_STUCK_LOOP):
+                continue
+
+            if state.attributes.get("hvac_action") in (
+                HVACAction.HEATING,
+                HVACAction.COOLING,
+            ):
+                continue
+
+            if not force and duration:
+                last = self._parse_switch_last_change(
+                    mode_def.get(ATTR_LAST_SWITCH_CHANGE)
+                )
+                if last is not None and now - last <= duration:
+                    continue
+
+            queue.append(sat)
+
+        if not queue:
+            self._logger.debug("anti-calc: no satellites need a flush")
+            return
+
+        self._logger.info("anti-calc sequence start: %s (force=%s)", queue, force)
+        self._anti_calc_queue = queue
+        self._anti_calc_current = None
+        self.async_write_ha_state()
+        await self._async_anti_calc_next()
+
+    async def _async_anti_calc_next(self) -> None:
+        """Flush the next satellite, or finish the sequence."""
+        if self._hvac_mode not in HVAC_ACTIVE or self.preset_mode == PRESET_EMERGENCY:
+            self._async_finish_anti_calc()
+            return
+
+        if not self._anti_calc_queue:
+            self._anti_calc_current = None
+            self._logger.info("anti-calc sequence complete")
+            self.async_write_ha_state()
+            return
+
+        hvac_on = self._hvac_on
+        if not hvac_on:
+            self._async_finish_anti_calc()
+            return
+
+        sat = self._anti_calc_queue.pop(0)
+        self._anti_calc_current = sat
+        self.async_write_ha_state()
+
+        entity_id = "climate." + sat
+        self._logger.info(
+            "anti-calc flushing '%s', remaining %s", sat, self._anti_calc_queue
+        )
+
+        await self.hass.services.async_call(
+            DOMAIN,
+            "stuck_prevention",
+            {ATTR_ENTITY_ID: entity_id},
+            context=self._context,
+        )
+
+        opening = hvac_on.get_switch_stale_open_time
+        gap = hvac_on.get_switch_stale_gap
+        opening_s = opening.total_seconds() if opening else 0
+        gap_s = gap.total_seconds() if gap else 0
+
+        if self._anti_calc_queue:
+            delay_s = opening_s + gap_s
+        else:
+            # Keep anti_calc_active true until the last valve should close.
+            delay_s = opening_s
+
+        self._async_schedule_anti_calc_next(delay_s)
+
+    async def async_run_stuck_prevention(self, force: bool = False) -> None:
         """Open the valve briefly to prevent sticking (anti-calc)."""
         if self.is_master:
-            self._logger.debug("stuck_prevention on master is ignored in this step")
+            await self._async_start_master_anti_calc(force=force)
             return
 
         if self.preset_mode == PRESET_EMERGENCY:
@@ -2053,6 +2246,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 )
                 # cancel scheduled switch routines
                 self._async_cancel_pwm_routines(end_stuck_loop=True)
+            self._async_finish_anti_calc()
         else:
             self._logger.debug("Emergency OFF recall send from %s", source)
 
