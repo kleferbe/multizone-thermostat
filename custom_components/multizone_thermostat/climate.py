@@ -120,6 +120,8 @@ from .platform_schema import PLATFORM_SCHEMA  # noqa: F401
 ERROR_STATE = [STATE_UNAVAILABLE, STATE_UNKNOWN, STATE_PROBLEM]
 NOT_SUPPORTED_SWITCH_STATES = [STATE_OPEN, STATE_OPENING, STATE_CLOSED, STATE_CLOSING]
 HVAC_ACTIVE = [HVACMode.HEAT, HVACMode.COOL]
+# True is legacy (boolean self_controlled). New satellites stay SELF until claimed.
+SAT_NEEDS_MASTER = (True, OperationMode.SELF, OperationMode.PENDING)
 
 # state_attr() was removed from homeassistant.helpers.template in HA 2026.5 
 def state_attr(hass, entity_id, attribute):
@@ -922,6 +924,9 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                     await self._async_routine_track_satelites(
                         entity_list=self._hvac_on.get_satelites
                     )
+                    # Claim satellites that already started as self_controlled
+                    # (new rooms, or restore after the first MASTER send).
+                    self._async_claim_self_controlled_satelites()
 
                 # run controller before pwm loop
                 async_track_point_in_utc_time(
@@ -1032,6 +1037,21 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 self.hass, satelites, self._async_satelite_change
             )
             self.async_on_remove(self._satelites)
+
+    def _async_claim_self_controlled_satelites(self) -> None:
+        """Take over satellites that are already in heat/cool but not master-controlled."""
+        if not self.is_master or not self._hvac_on:
+            return
+
+        for sat in self._hvac_on.get_satelites or []:
+            state = self.hass.states.get("climate." + sat)
+            if not state or state.state != self.hvac_mode:
+                continue
+            if state.attributes.get(ATTR_SELF_CONTROLLED) in SAT_NEEDS_MASTER:
+                self._async_change_satelite_modes(
+                    {sat: 0},
+                    control_mode=OperationMode.MASTER,
+                )
 
     @callback
     def _async_indoor_temp_change(self, event: Event[EventStateChangedData]) -> None:
@@ -1204,7 +1224,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         # check if satellite operating in correct mode
         if new_state.state == self.hvac_mode and new_state.attributes.get(
             ATTR_SELF_CONTROLLED
-        ) in [True, OperationMode.PENDING]:
+        ) in SAT_NEEDS_MASTER:
             # force satellite to master mode
             self._async_change_satelite_modes(
                 {new_state.entity_id.split(".", 1)[1]: 0},
