@@ -149,6 +149,7 @@ ATTR_KA = "ka"
 ATTR_KB = "kb"
 
 # Master mode
+CONF_MASTER = "master"
 CONF_MASTER_MODE = "master_mode"
 CONF_MASTER_OPERATION_MODE = "operation_mode"
 CONF_SATELITES = "satelites"

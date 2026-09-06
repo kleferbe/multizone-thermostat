@@ -128,7 +128,8 @@ class HVACSetting:
         self._pid = None
         self._wc = None
 
-        self._satelites = None
+        self._satelites = {}
+        self._registered_satelites: list[str] = []
         self.nesting = None
 
         self._stuck_loop = False
@@ -223,7 +224,7 @@ class HVACSetting:
             self._name,
             operation_mode=self._operation_mode,
             master_pwm=self.pwm_scale,
-            tot_area=self.area,
+            tot_area=max(self.area, 1.0),
             min_load=self.get_min_load,
             pwm_threshold=self.pwm_threshold,
             min_prop_valve_opening=self.get_min_valve_opening,
@@ -803,17 +804,26 @@ class HVACSetting:
         """
         return self._master[CONF_CONTINUOUS_LOWER_LOAD]
 
+    def set_registered_satelites(self, entity_ids: list[str]) -> None:
+        """Store membership from the zone registry (full entity_ids)."""
+        self._registered_satelites = list(entity_ids)
+
+    def update_area(self, area: float) -> None:
+        """Update heated area used for nesting."""
+        self.area = area
+        if self.nesting is not None:
+            self.nesting.set_tot_area(area)
+
     @property
-    def get_satelites(self) -> dict | None:
-        """Return the satelite thermostats."""
+    def get_satelites(self) -> list | None:
+        """Return registered satellite entity_ids."""
         if self.is_hvac_master_mode:
-            return self._master[CONF_SATELITES]
-        else:
-            return None
+            return self._registered_satelites
+        return None
 
     def update_satelite(self, state: State) -> bool:
         """Set and check new state of satelite."""
-        sat_name = state.entity_id.split(".", 1)[1]
+        sat_name = state.entity_id
         area = state.attributes.get(CONF_AREA)
         self_controlled = state.attributes.get(ATTR_SELF_CONTROLLED)
         update = False
@@ -911,7 +921,8 @@ class HVACSetting:
     def restore_satelites(self) -> None:
         """Remove the satelites and nesting."""
         self._satelites = {}
-        self.nesting.satelite_data(self._satelites)
+        if self.nesting is not None:
+            self.nesting.satelite_data(self._satelites)
 
     def set_satelite_offset(self, new_offsets: dict, forced: bool = True) -> None:
         """Store offset per satelite."""

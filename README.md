@@ -64,7 +64,7 @@ The multizone thermostat can operate in two modes:
 
 Per room a thermostat needs to be configured. A thermostat can operate by either hyesteris (on-off mode) or proportional mode (weather compensation and PID mode). The PID and weather compensation can be combined or one of both can be used. Only a satellite operating in proportional mode can be used as satellite as hysteris operation (on-off by a dT) cannot run in synchronised mode with other satellites and the master.
 
-When a master controller is included it will coordinate for all enlisted satellites the valve opening and closures. When the master hvac mode is heat or cool it will trigger the satellites to update their controller and from that moment it interacts with the master. A satellite interaction with the master will be updated when the master is activated or switched off. When the master is activated to heat or cool, the controller routines of all satellites are synced to the master controller. When the master is switched off the satellite will return to their stand-alone mode with individual settings. The master itself receives the satellite state (PWM signal) and return the moment the satellite has to open or close valves. The master determines the moment when the satellite valves is opened, the satellite itself still determines the valve opening time.
+When a master controller is included it will coordinate valve opening for satellites that set `master:` to that master's entity_id. When the master hvac mode is heat or cool it will bind those satellites and sync their controllers. When the master is switched off the satellites stay registered but return to stand-alone control. YAML order of master vs satellites does not matter.
 
 # Examples
 See the examples folder for examples. 
@@ -84,9 +84,10 @@ The thermostat can be configured for a wide variation of hardware specifications
 
 ## Thermostat configuration
 * platform (Required): 'multizone_thermostat'
-* name (Required): Name of thermostat. In case of master the name is overruled to 'master'.
+* name (Required): Name of thermostat. The climate entity_id is derived from this name (and unique_id), including the master.
 * unique_id (Optional): specify name for entity in registry else unique name is based on specified sensors and switches
-* room_area (Optional): Required when operating in satellite mode. The room area is needed to determine the scale effect of the room to the total heat requirement. Default = 0 (only stand alone mode possible, not allowed for satellite mode)
+* master (Optional): Full climate entity_id of the master, e.g. `climate.master`. If set, this thermostat registers as a satellite. Omit for stand-alone or for the master itself.
+* room_area (Optional): Floor area of this room. Required when `master:` is set (used for nesting). The master sums registered satellite areas; do not set a total on the master. Default = 0
 
 sensors (at least one sensor needs to be specified):
 * sensor (Optional): entity_id of the temperature sensor, sensor.state must be temperature (float). Not required when running in weather compensation only.
@@ -198,8 +199,8 @@ with the data (as sub):
 # Master configuration
 The configuration scheme is similar as for a satellite only with the following differences.
 
-* name: Specify 'master'. For master mode the user defined name is overruled by thermostat to 'master'
-* room_area (Required): For master it should be equal to the total heated area. 
+* name: Freely chosen. Not forced to `master`. Use `unique_id` if you need a stable entity_id such as `climate.master`.
+* room_area: Not set on the master. It is the sum of registered satellites.
 For master mode not applicable
 * sensor
 * filter_mode
@@ -226,7 +227,7 @@ For master mode not applicable
 ### Master configuration (Required) (sub of hvac mode)
 Specify the control of the satellites. Configured under 'master_mode:'
 
-Referenced thermostats (satellites) will be linked to this controller. The heat or cool requirement will be read from the satellites and are processed to determine master valve opening and adjust timing of satellite openings. 
+Satellites with `master: climate.<this_master>` register themselves. The heat or cool requirement will be read from the satellites and are processed to determine master valve opening and adjust timing of satellite openings. 
 
 The master will check satellite states and group them in on-off and proportional valves. The govering group will define the opening time of the master valve.  
 
@@ -236,8 +237,8 @@ Built-in preset `standby` (HVAC mode stays `heat` or `cool`): no heat or cool re
 
 Master attributes during a coordinated flush:
 * `anti_calc_active` (bool)
-* `anti_calc_satellite` (current room / climate object id)
-* `anti_calc_queue` (remaining rooms)
+* `anti_calc_satellite` (current satellite entity_id)
+* `anti_calc_queue` (remaining entity_ids)
 
 Satellites expose `anti_calc_active` as well (true while that valve's `stuck_loop` flush is running, including stand-alone).
 
@@ -247,7 +248,6 @@ The controller is called periodically and specified by control_interval.
 If no PWM interval is defined, it will set the state of "heater" from 0 to "PWM_scale" value as for a proportional valve. Else, when PWM is specified it will operate in on-off mode and will switch proportionally with the PWM signal.
 
 with the data (as sub):
-* satelites (Required): between square brackets defined list of thermostats by their name 
 * operation_mode (Optional): satellite nesting method: "minimal_on", "balanced" or "continuous". Default = "balanced"
 * lower_load_scale (Optional): For nesting assumed minimum required load heater. Default = 0.15. (a minimum heating capacity of 15%  assumed based on 100% when all rooms required heat)
 * control_interval (Required): interval that controller is updated. The satellites should have a control_interval equal to the master or the master control_interval should be dividable by the satellite control_interval. Specify a time period.

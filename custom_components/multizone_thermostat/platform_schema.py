@@ -33,6 +33,7 @@ from .const import (
     CONF_KD,
     CONF_KI,
     CONF_KP,
+    CONF_MASTER,
     CONF_MASTER_MODE,
     CONF_MASTER_OPERATION_MODE,
     CONF_MASTER_SCALE_BOUND,
@@ -53,7 +54,6 @@ from .const import (
     CONF_PWM_SCALE_HIGH,
     CONF_PWM_SCALE_LOW,
     CONF_PWM_THRESHOLD,
-    CONF_SATELITES,
     CONF_SENSOR,
     CONF_SENSOR_OUT,
     CONF_STALE_DURATION,
@@ -91,7 +91,6 @@ from .const import (
     NC_SWITCH_MODE,
     NO_SWITCH_MODE,
     NestingMode,
-    OperationMode,
 )
 
 SUPPORTED_HVAC_MODES = [HVACMode.HEAT, HVACMode.COOL, HVACMode.OFF]
@@ -200,7 +199,6 @@ prop_cool = {vol.Optional(CONF_PROPORTIONAL_MODE): vol.Schema({**prop})}
 master = {
     vol.Optional(CONF_MASTER_MODE): vol.Schema(
         {
-            vol.Required(CONF_SATELITES): cv.ensure_list,
             vol.Optional(CONF_MASTER_OPERATION_MODE, default=DEFAULT_OPERATION): vol.In(
                 [
                     NestingMode.MASTER_BALANCED,
@@ -247,8 +245,9 @@ PLATFORM_SCHEMA = vol.All(
     val.validate_window(),
     PLATFORM_SCHEMA.extend(
         {
-            vol.Optional(CONF_NAME, default=OperationMode.MASTER): cv.string,
+            vol.Optional(CONF_NAME, default="Thermostat"): cv.string,
             vol.Optional(CONF_UNIQUE_ID): cv.string,
+            vol.Optional(CONF_MASTER): cv.entity_id,
             vol.Optional(CONF_SENSOR): cv.entity_id,
             vol.Optional(CONF_FILTER_MODE, default=DEFAULT_SENSOR_FILTER): vol.Coerce(
                 int

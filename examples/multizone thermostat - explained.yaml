@@ -225,13 +225,12 @@ climate:
 
   # MASTER - SATELLITE WORKING EXAMPLE
   # this thermostat synchronizes and coordinates the satellites valve opening
-  # only one master is allowed
+  # satellites set master: climate.master (this entity's id from name: master)
   - platform: multizone_thermostat
-    name: master # used name is overruled to master to assure satellites can find i
+    name: master
     unique_id: mz_master
     initial_hvac_mode: "off" # or heat or cool
     initial_preset_mode: "none" # or one from 'custom_presets'
-    room_area: 165 # sum of all areas
 
     # be careful for the master stuck switch check
     # depending the configuration and connction to heater/cooling device
@@ -267,9 +266,6 @@ climate:
         tes: 20
 
       master_mode: # configuration required for master
-
-        # list of satellites to control
-        satelites: [pid1, pid2, pid3, pid4, pid5, pid6]
 
         # nesting routine.
         # "continuous": tries to create a continuous master valve opening when sufficient heat is required
@@ -325,6 +321,7 @@ climate:
   - platform: multizone_thermostat
     name: pid1
     unique_id: mz_pid1
+    master: climate.master
     room_area: 60 # floor area of room
     initial_hvac_mode: "off"
     precision: 0.1 # stepsize for setpoint
@@ -411,6 +408,7 @@ climate:
   - platform: multizone_thermostat
     name: pid2
     unique_id: mz_pid2
+    master: climate.master
     room_area: 30
     initial_hvac_mode: "off"
     precision: 0.1
@@ -483,6 +481,7 @@ climate:
   - platform: multizone_thermostat
     name: pid3
     unique_id: mz_pid3
+    master: climate.master
     room_area: 15
     initial_hvac_mode: "off"
     precision: 0.1
@@ -555,6 +554,7 @@ climate:
   - platform: multizone_thermostat
     name: pid4
     unique_id: mz_pid4
+    master: climate.master
     room_area: 20
     initial_hvac_mode: "off"
     precision: 0.1
@@ -627,6 +627,7 @@ climate:
   - platform: multizone_thermostat
     name: pid5
     unique_id: mz_pid5
+    master: climate.master
     room_area: 30
     initial_hvac_mode: "off"
     precision: 0.1
@@ -699,6 +700,7 @@ climate:
   - platform: multizone_thermostat
     name: pid6
     unique_id: mz_pid6
+    master: climate.master
     room_area: 10
     initial_hvac_mode: "off"
     precision: 0.1

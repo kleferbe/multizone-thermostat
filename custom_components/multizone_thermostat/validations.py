@@ -20,7 +20,6 @@ from .const import (
     CONF_PID_MODE,
     CONF_PROPORTIONAL_MODE,
     CONF_PWM_DURATION,
-    CONF_SATELITES,
     CONF_SENSOR,
     CONF_SENSOR_OUT,
     CONF_WC_MODE,
@@ -109,12 +108,6 @@ def validate_initial_sensors(*keys: str) -> Callable:
                             )
                         )
                 if CONF_MASTER_MODE in obj[hvac_mode]:
-                    if CONF_SATELITES not in obj[hvac_mode][CONF_MASTER_MODE]:
-                        raise vol.Invalid(
-                            "Master mode defined but no satelite thermostats for {} mode".format(
-                                hvac_mode
-                            )
-                        )
                     pwm_duration = timedelta(
                         seconds=obj[hvac_mode][CONF_MASTER_MODE][CONF_PWM_DURATION].get(
                             "seconds", 0

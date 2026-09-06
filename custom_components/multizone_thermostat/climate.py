@@ -69,20 +69,14 @@ from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 from . import DOMAIN, PLATFORMS, UKF_config, hvac_setting, services
 from .const import (
     ATTR_ANTI_CALC_ACTIVE,
-    ATTR_ANTI_CALC_QUEUE,
-    ATTR_ANTI_CALC_SATELLITE,
-    ATTR_CONTROL_MODE,
     ATTR_CONTROL_OFFSET,
-    ATTR_CONTROL_OUTPUT,
     ATTR_CONTROL_PWM_OUTPUT,
     ATTR_CURRENT_OUTDOOR_TEMPERATURE,
     ATTR_CURRENT_TEMP_VEL,
     ATTR_EMERGENCY_MODE,
     ATTR_FILTER_MODE,
     ATTR_HVAC_DEFINITION,
-    ATTR_LAST_SWITCH_CHANGE,
     ATTR_SELF_CONTROLLED,
-    ATTR_STUCK_LOOP,
     ATTR_VALUE,
     CLOSE_TO_PWM,
     CONF_AREA,
@@ -94,42 +88,33 @@ from .const import (
     CONF_FILTER_MODE,
     CONF_INITIAL_HVAC_MODE,
     CONF_INITIAL_PRESET_MODE,
+    CONF_MASTER,
     CONF_MASTER_MODE,
     CONF_PASSIVE_CHECK_TIME,
     CONF_PASSIVE_SWITCH_CHECK,
     CONF_PRECISION,
-    CONF_PWM_SCALE,
     CONF_SENSOR,
     CONF_SENSOR_OUT,
     CONF_STALE_DURATION,
-    CONTROL_START_DELAY,
-    MASTER_CONTROL_LEAD,
     NC_SWITCH_MODE,
     NO_SWITCH_MODE,
     PRESET_EMERGENCY,
     PRESET_RESTORE,
     PRESET_STANDBY,
     PWM_LAG,
-    SAT_CONTROL_LEAD,
     SERVICE_SET_VALUE,
     START_MISALINGMENT,
     OperationMode,
 )
 from .platform_schema import PLATFORM_SCHEMA  # noqa: F401
+from .master_role import MasterRole
+from .satellite_role import SatelliteRole
+from .standalone_role import StandaloneRole
 
 ERROR_STATE = [STATE_UNAVAILABLE, STATE_UNKNOWN, STATE_PROBLEM]
 NOT_SUPPORTED_SWITCH_STATES = [STATE_OPEN, STATE_OPENING, STATE_CLOSED, STATE_CLOSING]
 HVAC_ACTIVE = [HVACMode.HEAT, HVACMode.COOL]
-# True is legacy (boolean self_controlled). New satellites stay SELF until claimed.
-SAT_NEEDS_MASTER = (True, OperationMode.SELF, OperationMode.PENDING)
 
-# state_attr() was removed from homeassistant.helpers.template in HA 2026.5 
-def state_attr(hass, entity_id, attribute):
-    """Return the value of an attribute for an entity."""
-    state = hass.states.get(entity_id)
-    if state is None:
-        return None
-    return state.attributes.get(attribute)
 
 async def async_setup_platform(
     hass: HomeAssistant,
@@ -158,6 +143,7 @@ async def async_setup_platform(
     enable_old_integral = config.get(CONF_ENABLE_OLD_INTEGRAL)
     heat_conf = config.get(HVACMode.HEAT)
     cool_conf = config.get(HVACMode.COOL)
+    master_entity_id = config.get(CONF_MASTER)
 
     hvac_def = {}
     custom_presets = []
@@ -199,6 +185,7 @@ async def async_setup_platform(
                 sensor_stale_duration,
                 passive_switch,
                 passive_switch_time,
+                master_entity_id,
             )
         ]
     )
@@ -236,6 +223,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         sensor_stale_duration,
         passive_switch,
         passive_switch_time,
+        master_entity_id=None,
     ) -> None:
         """Initialize the thermostat."""
         self._temp_lock = asyncio.Lock()
@@ -268,23 +256,22 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         self._loop_pwm = None
         self._start_pwm = None
         self._stop_pwm = None
-        self._satelites = None
         self.time_changed = None
         self._pwm_start_time = None
-        self._sat_id = 0
         self.control_output = {ATTR_CONTROL_OFFSET: 0, ATTR_CONTROL_PWM_OUTPUT: 0}
         self._self_controlled = OperationMode.SELF
-        self._anti_calc_queue: list[str] = []
-        self._anti_calc_current: str | None = None
-        self._anti_calc_unsub = None
 
-        # check if it is master for Hvacmode.off
-        self.is_master = False
         self._attr_name = name
-        for _, hvac_mode in hvac_def.items():
-            if CONF_MASTER_MODE in hvac_mode:
-                self.is_master = True
-                self._attr_name = OperationMode.MASTER
+        self._master_entity_id = master_entity_id
+        is_master_conf = any(
+            CONF_MASTER_MODE in mode_config for mode_config in hvac_def.values()
+        )
+        if is_master_conf:
+            self._role = MasterRole(self)
+        elif master_entity_id:
+            self._role = SatelliteRole(self, master_entity_id)
+        else:
+            self._role = StandaloneRole(self)
 
         # setup control modes
         self._hvac_def = {}
@@ -304,6 +291,35 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         else:
             self._attr_unique_id = None
 
+    @property
+    def master_role(self) -> MasterRole | None:
+        """Master strategy, if this entity coordinates satellites."""
+        if isinstance(self._role, MasterRole):
+            return self._role
+        return None
+
+    @property
+    def satellite_role(self) -> SatelliteRole | None:
+        """Satellite strategy, if this entity belongs to a master."""
+        if isinstance(self._role, SatelliteRole):
+            return self._role
+        return None
+
+    @property
+    def is_master(self) -> bool:
+        """True when this entity has master_mode."""
+        return self.master_role is not None
+
+    @property
+    def room_area(self) -> float:
+        """Configured satellite area, or summed membership on the master."""
+        return self._area
+
+    @property
+    def hvac_active(self) -> bool:
+        """True when HVAC is heat or cool."""
+        return self._hvac_mode in HVAC_ACTIVE
+
     async def async_added_to_hass(self) -> None:
         """Run when entity about to be added.
 
@@ -311,6 +327,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         """
         self._logger.info("Add thermostat to hass")
         await super().async_added_to_hass()
+        await self._role.async_added()
 
         # Add listeners to track changes from the temp sensor
         if self._sensor_entity_id:
@@ -420,6 +437,11 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         else:
             self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_START, _async_startup)
 
+    async def async_will_remove_from_hass(self) -> None:
+        """Drop zone membership when the entity is unloaded."""
+        await self._role.async_removed()
+        await super().async_will_remove_from_hass()
+
     def restore_old_state(self, old_state) -> None:
         """Restore old state/config."""
         self._logger.debug("Old state stored : '%s'", old_state)
@@ -449,50 +471,37 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             self._logger.info("restore old controller settings")
             self._hvac_mode_init = old_hvac_mode
             self._preset_mode = old_preset_mode
-
-            # no more data needed for master
-            if self.is_master:
-                return
-
-            self._self_controlled = old_state.attributes.get(
-                ATTR_SELF_CONTROLLED, OperationMode.SELF
-            )
-
-            # set to pending state in order to be able again with sync with master
-            if self._self_controlled == OperationMode.MASTER:
-                self._logger.info("change state to pending master update")
-                self._self_controlled = OperationMode.PENDING
-
-            # restore old hvac modes
-            old_def = old_state.attributes[ATTR_HVAC_DEFINITION]
-            for key, data in old_def.items():
-                if key in self._hvac_def:
-                    self._hvac_def[key].restore_reboot(
-                        data,
-                        self._restore_parameters,
-                        self._restore_integral,
-                    )
-
-                # Restore the target temperature`
-                if old_hvac_mode != HVACMode.OFF:
-                    min_temp, max_temp = self._hvac_def[
-                        old_hvac_mode
-                    ].get_target_temp_limits
-
-                    # restore old temp when within range
-                    if (
-                        old_temperature is not None
-                        and min_temp <= old_temperature <= max_temp
-                    ):
-                        self._hvac_def[
-                            old_hvac_mode
-                        ].target_temperature = old_temperature
+            self.restore_controller_state(old_state)
+            self._role.restore_runtime_state(old_state)
 
         except Exception as e:
             self._hvac_mode_init = HVACMode.OFF
             self._logger.warning("restoring old state failed:%s", str(e))
             self._logger.debug(traceback.format_exc())
             return
+
+    def restore_controller_state(self, old_state) -> None:
+        """Restore HVAC settings and last self_controlled flag from HA state."""
+        self._self_controlled = old_state.attributes.get(
+            ATTR_SELF_CONTROLLED, OperationMode.SELF
+        )
+        old_def = old_state.attributes[ATTR_HVAC_DEFINITION]
+        old_hvac_mode = old_state.state
+        old_temperature = old_state.attributes.get(ATTR_TEMPERATURE)
+        for key, data in old_def.items():
+            if key in self._hvac_def:
+                self._hvac_def[key].restore_reboot(
+                    data,
+                    self._restore_parameters,
+                    self._restore_integral,
+                )
+            if old_hvac_mode != HVACMode.OFF:
+                min_temp, max_temp = self._hvac_def[old_hvac_mode].get_target_temp_limits
+                if (
+                    old_temperature is not None
+                    and min_temp <= old_temperature <= max_temp
+                ):
+                    self._hvac_def[old_hvac_mode].target_temperature = old_temperature
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -501,35 +510,25 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         for key, data in self._hvac_def.items():
             tmp_dict[key] = data.get_variable_attr
 
-        # master attributes
-        if self.is_master:
-            return {
-                CONF_AREA: self._area,
-                ATTR_HVAC_DEFINITION: tmp_dict,
-                ATTR_EMERGENCY_MODE: self._emergency_stop,
-                ATTR_ANTI_CALC_ACTIVE: self.anti_calc_active,
-                ATTR_ANTI_CALC_SATELLITE: self._anti_calc_current,
-                ATTR_ANTI_CALC_QUEUE: list(self._anti_calc_queue),
-            }
-        # for satellite states
-        else:
-            return {
-                ATTR_EMERGENCY_MODE: self._emergency_stop,
-                ATTR_SELF_CONTROLLED: self._self_controlled,
-                ATTR_CURRENT_TEMP_VEL: self.current_temperature_velocity,
-                ATTR_CURRENT_OUTDOOR_TEMPERATURE: self.outdoor_temperature,
-                ATTR_FILTER_MODE: self.filter_mode,
-                CONF_AREA: self._area,
-                ATTR_HVAC_DEFINITION: tmp_dict,
-                ATTR_ANTI_CALC_ACTIVE: self.anti_calc_active,
-            }
+        attrs = {
+            ATTR_HVAC_DEFINITION: tmp_dict,
+            ATTR_EMERGENCY_MODE: self._emergency_stop,
+            ATTR_ANTI_CALC_ACTIVE: self.anti_calc_active,
+            ATTR_SELF_CONTROLLED: self._self_controlled,
+            ATTR_CURRENT_TEMP_VEL: self.current_temperature_velocity,
+            ATTR_CURRENT_OUTDOOR_TEMPERATURE: self.outdoor_temperature,
+            ATTR_FILTER_MODE: self.filter_mode,
+            CONF_AREA: self._area,
+        }
+        return self._role.extra_attributes(attrs)
 
     @property
     def anti_calc_active(self) -> bool:
         """Return if an anti-calc flush is running on this entity."""
-        if self.is_master:
-            return bool(self._anti_calc_current or self._anti_calc_queue)
-        return any(data.stuck_loop for data in self._hvac_def.values())
+        stuck = any(data.stuck_loop for data in self._hvac_def.values())
+        if role := self.master_role:
+            return role.anti_calc_active or stuck
+        return stuck
 
     def set_detailed_output(self, hvac_mode: HVACMode, new_mode: bool) -> None:
         """Configure attribute output level."""
@@ -652,116 +651,15 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         pwm_start_time: float = 0,
         master_delay: float = 0,
     ) -> None:
-        """Satellite update from master.
-
-        Originates from master to control satellite routines
-        control_mode 'no_change' to only update offset.
-        """
-        pwm_loop = False
-        # mod controller update
-        self._logger.info(
-            "sat update received for mode:'%s'; offset:'%s'", control_mode, offset
-        )
-
-        # no current and no previous thus return
-        if self._old_mode == HVACMode.OFF and self._hvac_on is None:
-            self._self_controlled = control_mode
-            self._pwm_start_time = pwm_start_time
-            return
-
-        # if current mode is off: return
-        if self._hvac_on is None:
-            return
-
-        if not self._hvac_on.is_hvac_proportional_mode:
-            self._logger.warning("sat update for non-proportional thermostat")
-            return
-
-        # update offset
-        if offset is not None:
-            if self.control_output[ATTR_CONTROL_OFFSET] != offset:
-                self._hvac_on.time_offset = offset
-                self.control_output[ATTR_CONTROL_OFFSET] = offset
-            pwm_loop = True
-        else:
-            self._hvac_on.time_offset = 0
-            self.control_output[ATTR_CONTROL_OFFSET] = 0
-            pwm_loop = True
-
-        # turn thermostat to self controlled
-        if (
-            control_mode == OperationMode.SELF
-            and self._self_controlled != OperationMode.SELF
-        ):
-            self._logger.debug("sat update to self-controlled state")
-            self._self_controlled = OperationMode.SELF
-            self._hvac_on.master_delay = 0
-            self._sat_id = 0
-            # stop and reset current controller
-            self._async_routine_controller()
-            # cancel scheduled switch routines
-            self._async_cancel_pwm_routines(end_stuck_loop=True)
-            # include pwm routine
-            self._pwm_start_time = time.time() + CONTROL_START_DELAY
-
-            # start controller loop
-            async_track_point_in_utc_time(
-                self.hass,
-                self.async_routine_controller_factory(
-                    self._hvac_on.get_operate_cycle_time
-                ),
-                datetime.datetime.fromtimestamp(self._pwm_start_time),
+        """Satellite update from master (HA service satelite_mode)."""
+        if role := self.satellite_role:
+            role.set_satellite_mode(
+                control_mode,
+                offset=offset,
+                sat_id=sat_id,
+                pwm_start_time=pwm_start_time,
+                master_delay=master_delay,
             )
-
-            # start pwm loop
-            async_track_point_in_utc_time(
-                self.hass,
-                self.async_routine_pwm_factory(self._hvac_on.get_pwm_time),
-                datetime.datetime.fromtimestamp(self._pwm_start_time + PWM_LAG),
-            )
-
-        # activate satellite mode
-        elif control_mode == OperationMode.MASTER:
-            if self._self_controlled in [
-                OperationMode.PENDING,
-                OperationMode.SELF,
-            ]:
-                # new hvac mode thus all switches off
-                self._pwm_start_time = pwm_start_time
-                # self.update_pwm_time()
-                self._sat_id = sat_id
-                self._self_controlled = OperationMode.MASTER
-                self._hvac_on.master_delay = master_delay
-
-                # stop controller/pwm routines
-                if self._loop_controller:
-                    self._logger.debug("sat update: stopping controller routine")
-                    self._async_routine_controller()
-                if self._loop_pwm:
-                    self._logger.debug("sat update: stopping pwm routine")
-                    self._async_routine_pwm()
-
-                # cancel scheduled switch routines
-                self._async_cancel_pwm_routines(end_stuck_loop=True)
-
-                # schedule controller loop in sync with master
-                async_track_point_in_utc_time(
-                    self.hass,
-                    self.async_routine_controller_factory(
-                        self._hvac_on.get_operate_cycle_time
-                    ),
-                    datetime.datetime.fromtimestamp(
-                        self._pwm_start_time  # master control loop
-                        - sat_id * SAT_CONTROL_LEAD  # create some time inbetween sats
-                        - MASTER_CONTROL_LEAD  # sat control loop before master
-                    ),
-                )
-                # no pwm loop after master change wait for new offsets
-                pwm_loop = False
-
-        # update pwm start-stop rountines
-        if pwm_loop:
-            self.hass.async_create_task(self._async_controller_pwm(force=True))
 
     async def async_set_temperature(self, **kwargs) -> None:
         """Set new target temperature."""
@@ -835,16 +733,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                     ATTR_CONTROL_PWM_OUTPUT: 0,
                 }
 
-                # stop tracking satelites
-                if self.is_master:
-                    self._async_finish_anti_calc()
-                    await self._async_routine_track_satelites()
-                    satelite_reset = {sat: 0 for sat in self._hvac_on.get_satelites}
-                    self._async_change_satelite_modes(
-                        satelite_reset, control_mode=OperationMode.SELF
-                    )
-                    # reset to be ready for new satelites
-                    self._hvac_on.restore_satelites()
+                await self._role.async_on_hvac_leaving()
 
             # set current mode
             self._old_mode = self._hvac_mode
@@ -856,6 +745,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                     "HVAC mode is OFF. Turn the devices OFF and exit hvac change"
                 )
                 self._self_controlled = OperationMode.SELF
+                self._role.on_hvac_entered()
                 self.async_write_ha_state()
                 return
 
@@ -879,22 +769,10 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             if self._hvac_on.is_wc_mode and self.outdoor_temperature is not None:
                 self._hvac_on.outdoor_temperature = self.outdoor_temperature
 
-            # set in pending state for satellite mode changed while by master controlled
-            if self._self_controlled == OperationMode.MASTER:
-                self._logger.info(
-                    "HVAC change to active state in MASTER state, wait for MASTER. Set on PENDING and wait for master"
-                )
-                self._self_controlled = OperationMode.PENDING
-                self.async_write_ha_state()
-                return
-
-            elif self._self_controlled == OperationMode.PENDING:
-                self._logger.info(
-                    "HVAC change in pending state, wait for MASTER. Turn the switch OFF and exit hvac change"
-                )
-                await self._async_switch_turn_off()
-                self.async_write_ha_state()
-                return
+            if role := self.satellite_role:
+                if await role.should_wait_for_master():
+                    self.async_write_ha_state()
+                    return
 
             # thermostat in hysteris mode
             if self._hvac_on.is_hvac_on_off_mode:
@@ -903,30 +781,8 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                     self._async_routine_controller(self._hvac_on.get_operate_cycle_time)
 
             # proportional or master start-up
-            elif self.is_master or self._hvac_on.is_hvac_proportional_mode:
-                self._pwm_start_time = time.time()
-                if self.is_master:
-                    self._pwm_start_time += CONTROL_START_DELAY
-
-                # update and track satelites
-                if self.is_master:
-                    # update controller (reset) to be ready for new satelites
-                    self._hvac_on.restore_satelites()
-                    # bring controllers of satelite in sync with master
-                    # use the pwm
-                    satelite_reset = {sat: 0 for sat in self._hvac_on.get_satelites}
-                    self._async_change_satelite_modes(
-                        satelite_reset,
-                        control_mode=OperationMode.MASTER,
-                    )
-
-                    # start tracking changes of satelites
-                    await self._async_routine_track_satelites(
-                        entity_list=self._hvac_on.get_satelites
-                    )
-                    # Claim satellites that already started as self_controlled
-                    # (new rooms, or restore after the first MASTER send).
-                    self._async_claim_self_controlled_satelites()
+            elif self._role.pwm_follows_controller(self._hvac_on):
+                self._pwm_start_time = time.time() + self._role.control_start_delay
 
                 # run controller before pwm loop
                 async_track_point_in_utc_time(
@@ -946,6 +802,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                     )
 
             # Ensure we update the current operation after changing the mode
+            self._role.on_hvac_entered()
             self.async_write_ha_state()
 
     @callback
@@ -1021,37 +878,6 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             )
             self.hass.async_create_task(self._async_controller_pwm())
             self.async_on_remove(self._loop_pwm)
-
-    async def _async_routine_track_satelites(
-        self, entity_list: list | None = None
-    ) -> None:
-        """Follow changes from satelite thermostats."""
-        # stop tracking
-        if not entity_list and self._satelites is not None:
-            self._satelites()
-            self._satelites = None
-
-        elif entity_list and self._satelites is None:
-            satelites = ["climate." + sub for sub in entity_list]
-            self._satelites = async_track_state_change_event(
-                self.hass, satelites, self._async_satelite_change
-            )
-            self.async_on_remove(self._satelites)
-
-    def _async_claim_self_controlled_satelites(self) -> None:
-        """Take over satellites that are already in heat/cool but not master-controlled."""
-        if not self.is_master or not self._hvac_on:
-            return
-
-        for sat in self._hvac_on.get_satelites or []:
-            state = self.hass.states.get("climate." + sat)
-            if not state or state.state != self.hvac_mode:
-                continue
-            if state.attributes.get(ATTR_SELF_CONTROLLED) in SAT_NEEDS_MASTER:
-                self._async_change_satelite_modes(
-                    {sat: 0},
-                    control_mode=OperationMode.MASTER,
-                )
 
     @callback
     def _async_indoor_temp_change(self, event: Event[EventStateChangedData]) -> None:
@@ -1146,16 +972,10 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
     @callback
     def _async_stuck_switch_check(self, now) -> None:
         """Check if the switch has not changed for a certain period and force operation to avoid stuck or jammed."""
+        self._role.on_stuck_switch_check()
 
-        if self.is_master:
-            self.hass.async_create_task(self._async_start_master_anti_calc())
-            return
-
-        # Master coordinates satellites that are under its control.
-        if self._self_controlled in (OperationMode.MASTER, OperationMode.PENDING):
-            return
-
-        # check if thermostat is in operation
+    def _async_check_stuck_valves(self) -> None:
+        """Open a local valve if it has not moved for the stale duration."""
         if self._hvac_on and self._is_valve_open():
             return
 
@@ -1199,51 +1019,6 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 self.hass.async_create_task(
                     self._async_toggle_switch(hvac_mode, data[0])
                 )
-
-    @callback
-    def _async_satelite_change(self, event: Event[EventStateChangedData]) -> None:
-        """Handle satelite thermostat changes."""
-        new_state = event.data.get("new_state")
-        if not new_state:
-            self._logger.error("Error receiving thermostat update. 'None' received")
-            return
-        self._logger.debug(
-            "Receiving update from '%s'",
-            new_state.name,
-        )
-
-        # check if stuck loop is triggered
-        for hvac_def in new_state.attributes[ATTR_HVAC_DEFINITION].values():
-            if hvac_def.get(ATTR_STUCK_LOOP):
-                self._logger.debug(
-                    "'%s' is in stuck loop, ignore update",
-                    new_state.name,
-                )
-                return
-
-        # check if satellite operating in correct mode
-        if new_state.state == self.hvac_mode and new_state.attributes.get(
-            ATTR_SELF_CONTROLLED
-        ) in SAT_NEEDS_MASTER:
-            # force satellite to master mode
-            self._async_change_satelite_modes(
-                {new_state.entity_id.split(".", 1)[1]: 0},
-                control_mode=OperationMode.MASTER,
-            )
-            return
-
-        # updating master controller and check if pwm needs update
-        update_required = self._hvac_on.update_satelite(new_state)
-        if update_required and not self.pwm_controller_time:
-            self._logger.debug(
-                "Significant update from satelite: '%s' rerun controller",
-                new_state.name,
-            )
-            self.hass.async_create_task(self._async_controller(force=True))
-
-            # if master mode is active: do not call operate but let pwm cycle handle it
-
-            # self.schedule_update_ha_state(force_refresh=False)
 
     @callback
     def _async_switches_change(self, event: Event[EventStateChangedData]) -> None:
@@ -1368,73 +1143,11 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         if self._hvac_on:
             if not self._kf_temp:
                 self._hvac_on.current_temperature = self._current_temperature
-            elif not self.is_master:
+            else:
                 self._hvac_on.current_state = [
                     self._kf_temp.get_temp,
                     self._kf_temp.get_vel,
                 ]
-
-    @callback
-    def _async_change_satelite_modes(
-        self, data: dict, control_mode: OperationMode = OperationMode.NO_CHANGE
-    ) -> None:
-        """Create tasks by master to update all satelites and/or update pwm offset."""
-
-        if data:
-            for satelite, offset in data.items():
-                # factory as in device_sun_light_trigger
-                # +1 to account for master
-                if control_mode == OperationMode.MASTER:
-                    sat_id = self._hvac_on.get_satelites.index(satelite) + 1
-                    delay = self._hvac_on.compensate_valve_lag
-                else:
-                    sat_id = 0
-                    delay = 0
-
-                # create tasks to update
-                self.hass.async_create_task(
-                    self._async_send_satelite_data(
-                        satelite,
-                        offset,
-                        control_mode=control_mode,
-                        sat_id=sat_id,
-                        pwm_start_time=self._pwm_start_time,
-                        master_delay=delay,
-                    )
-                )
-
-        else:
-            self._logger.debug("No satelite data to send")
-
-    async def _async_send_satelite_data(
-        self,
-        satelite: str,
-        offset: float,
-        control_mode: OperationMode = OperationMode.NO_CHANGE,
-        sat_id: int = 0,
-        pwm_start_time: int = 0,
-        master_delay: float = 0,
-    ) -> None:
-        """Actual sending of control update to a satelite."""
-        self._logger.debug(
-            "send data to satelite %s %s %s", satelite, offset, control_mode
-        )
-
-        # call service to change satellite
-        await self.hass.services.async_call(
-            "multizone_thermostat",
-            "satelite_mode",
-            {
-                ATTR_ENTITY_ID: "climate." + satelite,
-                ATTR_CONTROL_MODE: control_mode,
-                ATTR_CONTROL_OFFSET: offset,
-                "sat_id": sat_id,
-                "pwm_start_time": pwm_start_time,
-                "master_delay": master_delay,
-            },
-            context=self._context,
-            # blocking=False,
-        )
 
     async def _async_check_duration(self, routine: bool, force: bool) -> bool:
         """Check if switch change in on-off mode has been long enough.
@@ -1532,10 +1245,11 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             )
 
             # do not run when not in sync with master
-            if self._self_controlled == OperationMode.PENDING:
-                self._logger.debug("Controller cancelled due to 'pending mode'")
-                if await self._async_check_emergency():
-                    return
+            if role := self.satellite_role:
+                if role.blocks_controller():
+                    self._logger.debug("Controller cancelled due to 'pending mode'")
+                    if await self._async_check_emergency():
+                        return
 
             # check emergency mode
             if self.preset_mode == PRESET_EMERGENCY:
@@ -1560,11 +1274,11 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 return
 
             # update and check current temperatures for pwm cycle
-            if routine and not self.is_master:
+            if routine and self._role.uses_room_sensor:
                 await self._async_update_current_temp()
 
             # send temperature to controller
-            if not self.is_master:
+            if self._role.uses_room_sensor:
                 await self._async_update_controller_temp()
 
             # cancel whne no sensor readings are present
@@ -1604,22 +1318,15 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             else:
                 offset = 0
 
-            if (
-                self.is_master
-                and routine is None
-                and self._hvac_on.close_to_routine(offset)
-            ):
-                # too close to routine, do not include satellite changes
-                return
+            if role := self.master_role:
+                if role.skip_control_near_pwm(routine, offset):
+                    # too close to routine, do not include satellite changes
+                    return
 
             # calculate actual pwm
             self._hvac_on.calculate(routine=routine, force=force, current_offset=offset)
-
-            # update satellites
-            if self.is_master:
-                # set offsets at satelites
-                satelite_info = self._hvac_on.get_satelite_offset()
-                self._async_change_satelite_modes(satelite_info)
+            if role := self.master_role:
+                role.publish_control()
 
             # get controller output
             self._hvac_on.calc_control_output()
@@ -1633,10 +1340,9 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 force  # forced run
                 or self._hvac_on.is_hvac_on_off_mode  # hysteris
                 or (
-                    (self._hvac_on.is_hvac_proportional_mode or self.is_master)
+                    self._role.pwm_follows_controller(self._hvac_on)
                     and not self._hvac_on.get_pwm_time  # proportional valve
                 )
-                # or (routine and self.is_master)  # master routine cycle
             ):
                 self._logger.debug(
                     "Running pwm controller from control loop with 'force=%s'", force
@@ -1829,27 +1535,15 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
 
     def _prop_valve_position(self, hvac_on, control_val: float | None = None):
         """Determine master utilisation for proportional valve scale factor."""
-        master_util = 1
-        # valve mode
         if not control_val:
             valve_pos = self.control_output[ATTR_CONTROL_PWM_OUTPUT]
         else:
             valve_pos = control_val
 
-        if self._self_controlled == OperationMode.MASTER:
-            master_mode = state_attr(
-                self.hass, "climate." + self._self_controlled, ATTR_HVAC_DEFINITION
-            )
-            if self.hvac_mode in master_mode and hvac_on.master_scaled_bound > 1:
-                master_control_val = master_mode[self.hvac_mode][ATTR_CONTROL_OUTPUT][
-                    ATTR_CONTROL_PWM_OUTPUT
-                ]
-                master_pwm_scale = master_mode[self.hvac_mode][CONF_PWM_SCALE]
-                if master_pwm_scale > 0:
-                    master_util = max(
-                        1 / hvac_on.master_scaled_bound,
-                        master_control_val / master_pwm_scale,
-                    )
+        if role := self.satellite_role:
+            master_util = role.master_pwm_utilisation(hvac_on)
+        else:
+            master_util = 1.0
 
         # scale valve opening with master pwm
         valve_pos /= master_util
@@ -1999,191 +1693,12 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             _hvac_on.stuck_loop = False
             self.async_write_ha_state()
 
-    def _async_cancel_anti_calc_schedule(self) -> None:
-        """Cancel a pending anti-calc sequence step."""
-        if self._anti_calc_unsub is not None:
-            self._anti_calc_unsub()
-            self._anti_calc_unsub = None
-
-    def _async_finish_anti_calc(self) -> None:
-        """Stop the master anti-calc sequence without closing satellite valves."""
-        self._async_cancel_anti_calc_schedule()
-        had_work = bool(self._anti_calc_current or self._anti_calc_queue)
-        self._anti_calc_queue = []
-        self._anti_calc_current = None
-        if had_work:
-            self._logger.info("anti-calc sequence finished")
-            self.async_write_ha_state()
-
-    def _parse_switch_last_change(self, value) -> datetime.datetime | None:
-        """Parse satellite switch_last_change from state attributes."""
-        if value is None:
-            return None
-        if isinstance(value, datetime.datetime):
-            if value.tzinfo is None:
-                return value.replace(tzinfo=datetime.UTC)
-            return value
-        if isinstance(value, str):
-            try:
-                parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError:
-                return None
-            if parsed.tzinfo is None:
-                return parsed.replace(tzinfo=datetime.UTC)
-            return parsed
-        return None
-
-    def _async_schedule_anti_calc_next(self, delay_s: float) -> None:
-        """Schedule the next anti-calc step."""
-        self._async_cancel_anti_calc_schedule()
-        if delay_s <= 0:
-            self.hass.async_create_task(self._async_anti_calc_next())
-            return
-
-        async def _run(now: datetime.datetime) -> None:
-            self._anti_calc_unsub = None
-            await self._async_anti_calc_next()
-
-        self._anti_calc_unsub = async_track_point_in_utc_time(
-            self.hass,
-            _run,
-            datetime.datetime.fromtimestamp(time.time() + delay_s),
-        )
-
-    async def _async_start_master_anti_calc(self, force: bool = False) -> None:
-        """Build a satellite flush queue and start sequential anti-calc."""
-        if not self.is_master:
-            return
-
-        if self._anti_calc_current or self._anti_calc_queue:
-            self._logger.debug("anti-calc skipped: sequence already running")
-            return
-
-        if self.preset_mode == PRESET_EMERGENCY:
-            self._logger.warning("anti-calc skipped: emergency mode")
-            return
-
-        if self._hvac_mode not in HVAC_ACTIVE:
-            self._logger.debug("anti-calc skipped: master not in heat/cool")
-            return
-
-        hvac_on = self._hvac_on
-        if not hvac_on or not hvac_on.is_hvac_master_mode:
-            return
-
-        duration = hvac_on.get_switch_stale
-        if not force and not duration:
-            self._logger.warning(
-                "anti-calc skipped: set heat.passive_switch_duration on the master"
-            )
-            return
-
-        satelites = hvac_on.get_satelites or []
-        now = datetime.datetime.now(datetime.UTC)
-        queue: list[str] = []
-
-        for sat in satelites:
-            entity_id = "climate." + sat
-            state = self.hass.states.get(entity_id)
-            if not state or state.state in ERROR_STATE:
-                continue
-            if state.state != self._hvac_mode:
-                continue
-
-            if state.attributes.get(ATTR_PRESET_MODE) == PRESET_EMERGENCY:
-                continue
-
-            emergency = state.attributes.get(ATTR_EMERGENCY_MODE)
-            if emergency:
-                continue
-
-            self_ctrl = state.attributes.get(ATTR_SELF_CONTROLLED)
-            if self_ctrl == OperationMode.SELF:
-                continue
-
-            mode_def = (state.attributes.get(ATTR_HVAC_DEFINITION) or {}).get(
-                self._hvac_mode
-            ) or {}
-            if mode_def.get(ATTR_STUCK_LOOP):
-                continue
-
-            if state.attributes.get("hvac_action") in (
-                HVACAction.HEATING,
-                HVACAction.COOLING,
-            ):
-                continue
-
-            if not force and duration:
-                last = self._parse_switch_last_change(
-                    mode_def.get(ATTR_LAST_SWITCH_CHANGE)
-                )
-                if last is not None and now - last <= duration:
-                    continue
-
-            queue.append(sat)
-
-        if not queue:
-            self._logger.debug("anti-calc: no satellites need a flush")
-            return
-
-        self._logger.info("anti-calc sequence start: %s (force=%s)", queue, force)
-        self._anti_calc_queue = queue
-        self._anti_calc_current = None
-        self.async_write_ha_state()
-        await self._async_anti_calc_next()
-
-    async def _async_anti_calc_next(self) -> None:
-        """Flush the next satellite, or finish the sequence."""
-        if self._hvac_mode not in HVAC_ACTIVE or self.preset_mode == PRESET_EMERGENCY:
-            self._async_finish_anti_calc()
-            return
-
-        if not self._anti_calc_queue:
-            self._anti_calc_current = None
-            self._logger.info("anti-calc sequence complete")
-            self.async_write_ha_state()
-            return
-
-        hvac_on = self._hvac_on
-        if not hvac_on:
-            self._async_finish_anti_calc()
-            return
-
-        sat = self._anti_calc_queue.pop(0)
-        self._anti_calc_current = sat
-        self.async_write_ha_state()
-
-        entity_id = "climate." + sat
-        self._logger.info(
-            "anti-calc flushing '%s', remaining %s", sat, self._anti_calc_queue
-        )
-
-        await self.hass.services.async_call(
-            DOMAIN,
-            "stuck_prevention",
-            {ATTR_ENTITY_ID: entity_id},
-            context=self._context,
-        )
-
-        opening = hvac_on.get_switch_stale_open_time
-        gap = hvac_on.get_switch_stale_gap
-        opening_s = opening.total_seconds() if opening else 0
-        gap_s = gap.total_seconds() if gap else 0
-
-        if self._anti_calc_queue:
-            delay_s = opening_s + gap_s
-        else:
-            # Keep anti_calc_active true until the last valve should close.
-            delay_s = opening_s
-
-        self._async_schedule_anti_calc_next(delay_s)
-
     async def async_run_stuck_prevention(self, force: bool = False) -> None:
         """Open the valve briefly to prevent sticking (anti-calc)."""
-        if self.is_master:
-            await self._async_start_master_anti_calc(force=force)
-            return
+        await self._role.async_run_stuck_prevention(force)
 
+    async def _async_run_local_stuck_prevention(self, force: bool = False) -> None:
+        """Open this entity's valve briefly to prevent sticking."""
         if self.preset_mode == PRESET_EMERGENCY:
             self._logger.warning("stuck_prevention skipped: emergency mode")
             return
@@ -2276,7 +1791,8 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 )
                 # cancel scheduled switch routines
                 self._async_cancel_pwm_routines(end_stuck_loop=True)
-            self._async_finish_anti_calc()
+            if role := self.master_role:
+                role.finish_anti_calc()
         else:
             self._logger.debug("Emergency OFF recall send from %s", source)
 
@@ -2350,9 +1866,8 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             old_preset = self.preset_mode
             self._hvac_on.preset_mode = preset_mode
             self._preset_mode = self._hvac_on.preset_mode
-            # update satellites
-            if self.is_master:
-                await self._async_set_satelite_preset(self._preset_mode)
+            if role := self.master_role:
+                await role.on_preset_changed(self._preset_mode)
             if (
                 self._preset_mode == PRESET_STANDBY
                 and old_preset != PRESET_STANDBY
@@ -2366,14 +1881,11 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             ):
                 if self._hvac_on.is_prop_pid_mode:
                     self._hvac_on.pid_reset_time()
-                if (
-                    self.is_master
-                    or self._self_controlled == OperationMode.SELF
-                ):
+                if self._role.should_run_controller_after_preset():
                     await self._async_controller(force=True)
             elif (
                 self.preset_mode != PRESET_EMERGENCY
-                and self._self_controlled == OperationMode.SELF
+                and self._role.should_run_controller_after_preset()
             ):
                 await self._async_controller(force=True)
 
@@ -2385,21 +1897,6 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             self._preset_mode = PRESET_NONE
 
         self.async_write_ha_state()
-
-    async def _async_set_satelite_preset(self, preset_mode: str) -> None:
-        """Change preset mode at satelites."""
-        for sat in self._hvac_on.get_satelites:
-            await self.hass.services.async_call(
-                "multizone_thermostat",
-                "set_preset_mode",
-                {
-                    ATTR_ENTITY_ID: "climate." + sat,
-                    ATTR_PRESET_MODE: preset_mode,
-                    ATTR_HVAC_MODE: self.hvac_mode,
-                },
-                context=self._context,
-                # blocking=False,
-            )
 
     def _is_valve_open(self, hvac_mode: HVACMode | None = None) -> bool:
         """Check if the valve is open.
@@ -2451,7 +1948,54 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
 
         return return_val
 
+    @property
+    def room_min_temp(self) -> float | None:
+        """Configured min setpoint while HVAC is on."""
+        if self._hvac_on:
+            if self._hvac_mode != HVACMode.OFF:
+                if self.preset_mode in self._hvac_on.custom_presets:
+                    return self._hvac_on.get_preset_temp
+                if self._hvac_on.min_target_temp:
+                    return self._hvac_on.min_target_temp
+            return None
+        return None
 
+    @property
+    def room_max_temp(self) -> float | None:
+        """Configured max setpoint while HVAC is on."""
+        if self._hvac_on:
+            if self._hvac_mode != HVACMode.OFF:
+                if self.preset_mode in self._hvac_on.custom_presets:
+                    return self._hvac_on.get_preset_temp
+                if self._hvac_on.max_target_temp:
+                    return self._hvac_on.max_target_temp
+            return None
+        return None
+
+    @property
+    def room_current_temperature(self) -> float | None:
+        """Filtered or raw room temperature."""
+        if not self._kf_temp:
+            return self._current_temperature
+        return round(self._kf_temp.get_temp, 3)
+
+    @property
+    def room_current_temperature_velocity(self) -> float | None:
+        """Filtered or PID room temperature velocity."""
+        if not self._kf_temp:
+            if self._hvac_on:
+                if self._hvac_on.is_prop_pid_mode:
+                    return self._hvac_on.get_velocity
+                return "no velocity calculated"
+            return "only available when hvac on"
+        return round(self._kf_temp.get_vel, 5)
+
+    @property
+    def room_target_temperature(self) -> float | None:
+        """Active HVAC target temperature, or None when off."""
+        if self._hvac_mode is HVACMode.OFF or self._hvac_mode is None or self._hvac_on is None:
+            return None
+        return self._hvac_on.target_temperature
 
     @property
     def precision(self) -> float:
@@ -2470,60 +2014,30 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
     @property
     def min_temp(self) -> float:
         """Return the minimum temperature."""
-        if self._hvac_on:
-            if self.is_master:
-                return None
-            if self._hvac_mode != HVACMode.OFF:
-                if self.preset_mode in self._hvac_on.custom_presets:
-                    return self._hvac_on.get_preset_temp
-                elif self._hvac_on.min_target_temp:
-                    return self._hvac_on.min_target_temp
-        else:
+        if self.master_role:
             return None
+        return self.room_min_temp
 
     @property
     def max_temp(self) -> float:
         """Return the maximum temperature."""
-        if self._hvac_on:
-            if self.is_master:
-                return None
-            elif self._hvac_mode != HVACMode.OFF:
-                if self.preset_mode in self._hvac_on.custom_presets:
-                    return self._hvac_on.get_preset_temp
-                elif self._hvac_on.max_target_temp:
-                    return self._hvac_on.max_target_temp
-        else:
+        if self.master_role:
             return None
+        return self.room_max_temp
 
     @property
     def current_temperature(self) -> float | None:
         """Return the sensor temperature."""
-        if self._hvac_on:
-            if self.is_master:
-                return None
-
-        if not self._kf_temp:
-            return self._current_temperature
-        else:
-            return round(self._kf_temp.get_temp, 3)
+        if self.master_role and self._hvac_on:
+            return None
+        return self.room_current_temperature
 
     @property
     def current_temperature_velocity(self) -> float | None:
         """Return the sensor temperature velocity."""
-        if self._hvac_on:
-            if self.is_master:
-                return None
-
-        if not self._kf_temp:
-            if self._hvac_on:
-                if self._hvac_on.is_prop_pid_mode:
-                    return self._hvac_on.get_velocity
-                else:
-                    return "no velocity calculated"
-            else:
-                return "only available when hvac on"
-        else:
-            return round(self._kf_temp.get_vel, 5)
+        if self.master_role and self._hvac_on:
+            return None
+        return self.room_current_temperature_velocity
 
     @property
     def outdoor_temperature(self) -> float | None:
@@ -2557,15 +2071,9 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
     @property
     def target_temperature(self) -> float | None:
         """Return the temperature we try to reach."""
-        if self.is_master:
+        if self.master_role:
             return 0
-        elif (
-            self._hvac_mode is HVACMode.OFF
-            or self._hvac_mode is None
-            or self._hvac_on is None
-        ):
-            return None
-        return self._hvac_on.target_temperature
+        return self.room_target_temperature
 
     @property
     def hvac_modes(self) -> HVACMode:
@@ -2588,10 +2096,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         _, _hvac_on, _ = self.get_hvac_data(hvac_mode)
 
         modes = [PRESET_NONE, PRESET_STANDBY, PRESET_EMERGENCY]
-        if _hvac_on is not None:
-            if _hvac_on.custom_presets or self.is_master:
-                modes = modes + list(_hvac_on.custom_presets.keys())
-
+        modes = modes + self._role.extra_preset_keys(_hvac_on)
         return modes
 
     @property

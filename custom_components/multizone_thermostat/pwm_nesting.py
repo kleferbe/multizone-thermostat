@@ -57,7 +57,7 @@ class Nesting:
         self.min_area = min_load * NESTING_MATRIX
         self.pwm_threshold = pwm_threshold / self.master_pwm * NESTING_MATRIX
         self.min_prop_valve_opening = min_prop_valve_opening * NESTING_MATRIX
-        self.area_scale = NESTING_MATRIX / tot_area
+        self.area_scale = NESTING_MATRIX / max(float(tot_area), 1.0)
 
         self.packed = []
         self.scale_factor = {}
@@ -72,6 +72,10 @@ class Nesting:
         # proportional valves
         self.prop_pwm = []
         self.prop_area = []
+
+    def set_tot_area(self, tot_area: float) -> None:
+        """Update nesting scale when registered satellite area changes."""
+        self.area_scale = NESTING_MATRIX / max(float(tot_area), 1.0)
 
     @property
     def load_on_off(self):
