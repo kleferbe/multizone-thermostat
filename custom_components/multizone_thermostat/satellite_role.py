@@ -11,12 +11,11 @@ from homeassistant.helpers.event import async_track_point_in_utc_time
 
 from .const import (
     ATTR_CONTROL_OFFSET,
-    ATTR_CONTROL_OUTPUT,
     ATTR_CONTROL_PWM_OUTPUT,
-    ATTR_HVAC_DEFINITION,
-    CONF_PWM_SCALE,
     CONTROL_START_DELAY,
     MASTER_CONTROL_LEAD,
+    PRESET_EMERGENCY,
+    PRESET_STANDBY,
     PWM_LAG,
     SAT_CONTROL_LEAD,
     OperationMode,
@@ -36,6 +35,11 @@ class SatelliteRole(StandaloneRole):
         self.master_id = master_id
         self._sat_id = 0
 
+    @property
+    def associated_master_role(self) -> MasterRole | None:
+        """Registered master for this satellite, if it is already in hass."""
+        return async_get_registry(self.entity.hass).master(self.master_id)
+
     async def async_added(self) -> None:
         async_get_registry(self.entity.hass).register_satellite(self, self.master_id)
 
@@ -44,8 +48,7 @@ class SatelliteRole(StandaloneRole):
         async_get_registry(self.entity.hass).unregister_satellite(self, self.master_id)
 
     def on_hvac_entered(self) -> None:
-        master = async_get_registry(self.entity.hass).master(self.master_id)
-        if master is not None:
+        if master := self.associated_master_role:
             master.bind_satellite(self)
 
     def restore_runtime_state(self, old_state) -> None:
@@ -61,7 +64,32 @@ class SatelliteRole(StandaloneRole):
         t._async_check_stuck_valves()
 
     def blocks_controller(self) -> bool:
+        """True while waiting for the master role to exist and claim this satellite."""
+        if self.associated_master_role is None:
+            return True
         return self.entity._self_controlled == OperationMode.PENDING
+
+    @property
+    def plant_idle(self) -> bool:
+        """True when the master has taken the plant out of climate service."""
+        if self.entity._self_controlled not in (
+            OperationMode.MASTER,
+            OperationMode.PENDING,
+        ):
+            return False
+        if master := self.associated_master_role:
+            return master.plant_idle
+        return False
+
+    def should_run_controller_after_preset(self) -> bool:
+        t = self.entity
+        if self.blocks_controller():
+            return False
+        if t.preset_mode in (PRESET_STANDBY, PRESET_EMERGENCY):
+            return False
+        if self.plant_idle:
+            return False
+        return True
 
     async def should_wait_for_master(self) -> bool:
         t = self.entity
@@ -198,23 +226,14 @@ class SatelliteRole(StandaloneRole):
 
     def master_pwm_utilisation(self, hvac_on) -> float:
         t = self.entity
-        if t._self_controlled != OperationMode.MASTER:
+        if t._self_controlled != OperationMode.MASTER or hvac_on.master_scaled_bound <= 1:
             return 1.0
-        state = t.hass.states.get(self.master_id)
-        master_mode = state.attributes.get(ATTR_HVAC_DEFINITION) if state else None
-        if not (
-            master_mode
-            and t.hvac_mode in master_mode
-            and hvac_on.master_scaled_bound > 1
-        ):
+        if not (master := self.associated_master_role) or master.entity.hvac_mode != t.hvac_mode:
             return 1.0
-        master_control_val = master_mode[t.hvac_mode][ATTR_CONTROL_OUTPUT][
-            ATTR_CONTROL_PWM_OUTPUT
-        ]
-        master_pwm_scale = master_mode[t.hvac_mode][CONF_PWM_SCALE]
-        if master_pwm_scale <= 0:
+        master_hvac = master.entity._hvac_on
+        if not master_hvac or master_hvac.pwm_scale <= 0:
             return 1.0
         return max(
             1 / hvac_on.master_scaled_bound,
-            master_control_val / master_pwm_scale,
+            master.entity.control_output[ATTR_CONTROL_PWM_OUTPUT] / master_hvac.pwm_scale,
         )

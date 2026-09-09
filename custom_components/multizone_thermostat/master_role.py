@@ -29,6 +29,7 @@ from .const import (
     ATTR_STUCK_LOOP,
     CONTROL_START_DELAY,
     PRESET_EMERGENCY,
+    PRESET_STANDBY,
     OperationMode,
 )
 from .role import ThermostatRole
@@ -96,6 +97,11 @@ class MasterRole(ThermostatRole):
 
     def should_run_controller_after_preset(self) -> bool:
         return True
+
+    @property
+    def plant_idle(self) -> bool:
+        """True when the plant is out of climate service."""
+        return self.entity.preset_mode in (PRESET_STANDBY, PRESET_EMERGENCY)
 
     def extra_preset_keys(self, hvac_on) -> list:
         if hvac_on is None:
@@ -266,15 +272,6 @@ class MasterRole(ThermostatRole):
             pwm_start_time=pwm_start_time,
             master_delay=master_delay,
         )
-
-    async def on_preset_changed(self, preset_mode: str) -> None:
-        t = self.entity
-        registry = async_get_registry(t.hass)
-        for sat_id in t._hvac_on.get_satelites or []:
-            sat = registry.satellite(t.entity_id, sat_id)
-            if sat is None:
-                continue
-            await sat.entity.async_set_preset_mode(preset_mode, hvac_mode=t.hvac_mode)
 
     def _cancel_anti_calc_schedule(self) -> None:
         if self._anti_calc_unsub is not None:

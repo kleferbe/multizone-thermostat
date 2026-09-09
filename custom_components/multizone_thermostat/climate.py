@@ -320,6 +320,19 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         """True when HVAC is heat or cool."""
         return self._hvac_mode in HVAC_ACTIVE
 
+    def control_is_idle(self) -> bool:
+        """True when this entity must not request heat or cool.
+
+        Own standby always applies. A satellite is also idle while its
+        master is missing, pending, or in standby/emergency; the room
+        preset is left unchanged.
+        """
+        if self.preset_mode == PRESET_STANDBY:
+            return True
+        if role := self.satellite_role:
+            return role.blocks_controller() or role.plant_idle
+        return False
+
     async def async_added_to_hass(self) -> None:
         """Run when entity about to be added.
 
@@ -759,6 +772,9 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 )
 
             self._hvac_on = _hvac_on
+            if self.control_is_idle():
+                self._hvac_on.reset_control_output()
+                self.control_output = self._hvac_on.get_control_output
 
             # reset time stamp pid to avoid integral run-off
             if self._hvac_on.is_prop_pid_mode:
@@ -1244,13 +1260,6 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 "Controller: calculate output, routine=%s; forced=%s", routine, force
             )
 
-            # do not run when not in sync with master
-            if role := self.satellite_role:
-                if role.blocks_controller():
-                    self._logger.debug("Controller cancelled due to 'pending mode'")
-                    if await self._async_check_emergency():
-                        return
-
             # check emergency mode
             if self.preset_mode == PRESET_EMERGENCY:
                 if not self._emergency_stop:
@@ -1258,8 +1267,10 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 self._logger.debug("Controller cancelled due to 'emergency mode'")
                 return
 
-            if self.preset_mode == PRESET_STANDBY:
-                self._logger.debug("Controller skipped: standby preset")
+            if self.control_is_idle():
+                self._logger.debug(
+                    "Controller skipped: idle (standby or master plant idle)"
+                )
                 if self._hvac_on:
                     self._hvac_on.reset_control_output()
                     self.control_output = self._hvac_on.get_control_output
@@ -1366,12 +1377,12 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 self._logger.debug("PWM skipped: stuck_loop active")
                 return
 
-            # keep off in emergency, standby or pwm = 0
+            # keep off in emergency, standby, master plant idle, or pwm = 0
             if (
                 self.control_output[ATTR_CONTROL_PWM_OUTPUT] in [None, 0]
                 or self._hvac_on is None
                 or self.preset_mode == PRESET_EMERGENCY
-                or self.preset_mode == PRESET_STANDBY
+                or self.control_is_idle()
             ):
                 self._async_cancel_pwm_routines()
             # determine switch on-off or valve position
@@ -1866,17 +1877,15 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             old_preset = self.preset_mode
             self._hvac_on.preset_mode = preset_mode
             self._preset_mode = self._hvac_on.preset_mode
-            if role := self.master_role:
-                await role.on_preset_changed(self._preset_mode)
             if (
-                self._preset_mode == PRESET_STANDBY
-                and old_preset != PRESET_STANDBY
+                self._preset_mode in (PRESET_STANDBY, PRESET_EMERGENCY)
+                and old_preset not in (PRESET_STANDBY, PRESET_EMERGENCY)
             ):
                 self._hvac_on.reset_control_output()
                 self.control_output = self._hvac_on.get_control_output
                 self._async_cancel_pwm_routines()
             elif (
-                old_preset == PRESET_STANDBY
+                old_preset in (PRESET_STANDBY, PRESET_EMERGENCY)
                 and self._preset_mode not in (PRESET_STANDBY, PRESET_EMERGENCY)
             ):
                 if self._hvac_on.is_prop_pid_mode:

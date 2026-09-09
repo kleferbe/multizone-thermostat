@@ -840,7 +840,7 @@ class HVACSetting:
             ]
 
             if (
-                preset == PRESET_EMERGENCY
+                preset in (PRESET_EMERGENCY, PRESET_STANDBY)
                 or self_controlled != OperationMode.MASTER
                 or control_mode != CONF_PROPORTIONAL_MODE
             ):

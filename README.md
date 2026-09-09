@@ -231,9 +231,9 @@ Satellites with `master: climate.<this_master>` register themselves. The heat or
 
 The master will check satellite states and group them in on-off and proportional valves. The govering group will define the opening time of the master valve.  
 
-The preset mode changes on the master will be synced to the satellites.
+Satellites keep and persist their own presets (`none`, `standby`, `emergency`, or a name from `extra_presets`). Master preset changes are not copied onto satellites. Each satellite reads the master's preset on its control cycle: master `standby`/`emergency` yields no valve opening from the next cycle.
 
-Built-in preset `standby` (HVAC mode stays `heat` or `cool`): no heat or cool request to satellite valves or the master switch, PID is frozen, anti-calc still runs. Use this when the plant is not in climate service (e.g. DHW-only). Master HVAC `off` is unchanged: satellites return to stand-alone control.
+Built-in preset `standby` (HVAC mode stays `heat` or `cool`): no heat or cool request to the switch, PID is frozen, anti-calc still runs. On the master this takes the whole plant out of climate service (e.g. DHW-only) without changing room presets. On a satellite, `standby` silences only that room while the master is in climate service. Master HVAC `off` is unchanged: satellites return to stand-alone control.
 
 Master attributes during a coordinated flush:
 * `anti_calc_active` (bool)
@@ -279,7 +279,7 @@ Preset `standby` can also be set with the standard Home Assistant service `clima
 ## set_mid_diff / pwm_threshold:
 Change the 'minimal_diff' / PWM threshold before the switch is operated
 ## set_preset_mode:
-Change the preset (`none`, `standby`, `emergency`, or a name from `extra_presets`)
+Change the preset (`none`, `standby`, `emergency`, or a name from `extra_presets`). Master `standby`/`emergency` is observed by satellites on their next control cycle; room presets are not overwritten.
 ## set_pid:
 Change the current kp, ki, kd values of the PID or Valve PID controller
 ## set_integral:
