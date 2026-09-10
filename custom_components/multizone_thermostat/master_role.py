@@ -73,7 +73,7 @@ class MasterRole(ThermostatRole):
         return attrs
 
     def member_ids(self) -> list[str]:
-        return async_get_registry(self.entity.hass).member_ids(self.entity.entity_id)
+        return sorted(async_get_registry(self.entity.hass).satellites_of(self))
 
     def restore_runtime_state(self, old_state) -> None:
         return
@@ -123,17 +123,18 @@ class MasterRole(ThermostatRole):
             sat.apply_master_control(self)
         elif sat.entity._self_controlled != OperationMode.SELF:
             sat.apply_self_control()
+        sat.entity.async_write_ha_state()
 
     def bind_all(self) -> None:
         registry = async_get_registry(self.entity.hass)
-        for sat in list(registry.satellites(self.entity.entity_id).values()):
+        for sat in list(registry.satellites_of(self).values()):
             self.bind_satellite(sat)
 
     def sync_registered_satellites(self) -> None:
         t = self.entity
         if t.entity_id is None:
             return
-        sats = async_get_registry(t.hass).satellites(t.entity_id)
+        sats = async_get_registry(t.hass).satellites_of(self)
         ids = sorted(sats)
         area = sum(sat.entity.room_area for sat in sats.values())
         t._area = area
@@ -156,7 +157,7 @@ class MasterRole(ThermostatRole):
         t = self.entity
         await self.async_track_satellites()
         registry = async_get_registry(t.hass)
-        for sat in list(registry.satellites(t.entity_id).values()):
+        for sat in list(registry.satellites_of(self).values()):
             sat.apply_self_control()
         registry.unregister_master(self)
 
@@ -206,6 +207,15 @@ class MasterRole(ThermostatRole):
                 return
 
         if not t._hvac_on:
+            return
+
+        sat = async_get_registry(t.hass).satellites_of(self).get(new_state.entity_id)
+        if (
+            sat
+            and sat.entity.hvac_active
+            and sat.entity._self_controlled != OperationMode.MASTER
+        ):
+            self.bind_satellite(sat)
             return
 
         update_required = t._hvac_on.update_satelite(new_state)

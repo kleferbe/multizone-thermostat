@@ -12,6 +12,7 @@ from homeassistant.helpers.event import async_track_point_in_utc_time
 from .const import (
     ATTR_CONTROL_OFFSET,
     ATTR_CONTROL_PWM_OUTPUT,
+    CONF_MASTER,
     CONTROL_START_DELAY,
     MASTER_CONTROL_LEAD,
     PRESET_EMERGENCY,
@@ -39,6 +40,10 @@ class SatelliteRole(StandaloneRole):
     def associated_master_role(self) -> MasterRole | None:
         """Registered master for this satellite, if it is already in hass."""
         return async_get_registry(self.entity.hass).master(self.master_id)
+
+    def extra_attributes(self, attrs: dict) -> dict:
+        attrs[CONF_MASTER] = self.master_id
+        return attrs
 
     async def async_added(self) -> None:
         async_get_registry(self.entity.hass).register_satellite(self, self.master_id)

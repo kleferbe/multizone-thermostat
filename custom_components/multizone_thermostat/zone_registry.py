@@ -30,12 +30,32 @@ class ZoneRegistry:
         self.masters: dict[str, MasterRole] = {}
 
     def master(self, master_id: str) -> MasterRole | None:
-        """Return the live master role, if it has been added to hass."""
-        return self.masters.get(master_id)
+        """Return the live master role for an entity_id or climate.<unique_id>."""
+        if found := self.masters.get(master_id):
+            return found
+        for current in self.masters.values():
+            if master_id in self._master_aliases(current):
+                return current
+        return None
+
+    def _master_aliases(self, master: MasterRole) -> set[str]:
+        aliases = {master.entity.entity_id}
+        if uid := master.entity.unique_id:
+            aliases.add(f"climate.{uid}")
+        return aliases
 
     def satellites(self, master_id: str) -> dict[str, SatelliteRole]:
-        """Registered satellite roles for a master (may be empty)."""
+        """Registered satellite roles for a master id (may be empty)."""
+        if master := self.master(master_id):
+            return self.satellites_of(master)
         return self.members.get(master_id, {})
+
+    def satellites_of(self, master: MasterRole) -> dict[str, SatelliteRole]:
+        """All satellites whose configured master resolves to this role."""
+        out: dict[str, SatelliteRole] = {}
+        for key in self._master_aliases(master):
+            out.update(self.members.get(key, {}))
+        return out
 
     def member_ids(self, master_id: str) -> list[str]:
         """Stable satellite entity_ids for a master."""
@@ -62,9 +82,9 @@ class ZoneRegistry:
             master.unenroll_satellite(sat)
 
     def register_master(self, master: MasterRole) -> None:
-        """Add a master and enroll satellites already waiting on its entity_id."""
+        """Add a master and enroll satellites already waiting for it."""
         self.masters[master.entity.entity_id] = master
-        for sat in list(self.satellites(master.entity.entity_id).values()):
+        for sat in list(self.satellites_of(master).values()):
             master.enroll_satellite(sat)
 
     def rekey_entity(self, old_id: str, new_id: str) -> None:
@@ -79,7 +99,7 @@ class ZoneRegistry:
                 dest.update(self.members.pop(old_id))
                 for sat in dest.values():
                     sat.master_id = new_id
-            for sat in list(self.satellites(new_id).values()):
+            for sat in list(self.satellites_of(master).values()):
                 master.enroll_satellite(sat)
             return
         for master_id, group in self.members.items():
