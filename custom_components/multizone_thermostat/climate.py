@@ -919,10 +919,15 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         self._logger.debug("New sensor temperature '%s'", new_state.state)
 
         if new_state is None or new_state.state in ERROR_STATE:
-            self._logger.warning(
+            # Before the first valid reading this is the normal boot sequence
+            # (unavailable → unknown). After that it means the sensor dropped out.
+            self._logger.log(
+                logging.WARNING
+                if self._current_temperature is not None
+                else logging.DEBUG,
                 "Sensor temperature %s invalid: %s, skip current state",
-                new_state.name,
-                new_state.state,
+                new_state.name if new_state else self._sensor_entity_id,
+                None if new_state is None else new_state.state,
             )
             return
         elif not is_float(new_state.state):
@@ -1312,7 +1317,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 or self._hvac_on.is_hvac_proportional_mode
             ):
                 if self._sensor_entity_id and self._hvac_on.current_temperature is None:
-                    self._logger.warning(
+                    self._logger.debug(
                         "cancel control loop: current temp is None while running controller routine."
                     )
                     return
