@@ -522,13 +522,15 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                     self._restore_parameters,
                     self._restore_integral,
                 )
-            if old_hvac_mode != HVACMode.OFF:
-                min_temp, max_temp = self._hvac_def[old_hvac_mode].get_target_temp_limits
-                if (
-                    old_temperature is not None
-                    and min_temp <= old_temperature <= max_temp
-                ):
-                    self._hvac_def[old_hvac_mode].target_temperature = old_temperature
+        if old_hvac_mode != HVACMode.OFF and old_hvac_mode in self._hvac_def:
+            min_temp, max_temp = self._hvac_def[old_hvac_mode].get_target_temp_limits
+            if (
+                old_temperature is not None
+                and min_temp is not None
+                and max_temp is not None
+                and min_temp <= old_temperature <= max_temp
+            ):
+                self._hvac_def[old_hvac_mode].target_temperature = old_temperature
 
     @property
     def extra_state_attributes(self) -> dict:
