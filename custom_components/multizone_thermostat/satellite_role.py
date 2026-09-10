@@ -42,6 +42,11 @@ class SatelliteRole(StandaloneRole):
 
     async def async_added(self) -> None:
         async_get_registry(self.entity.hass).register_satellite(self, self.master_id)
+        if self.associated_master_role is None:
+            self.entity._logger.info(
+                "Waiting for master '%s'",
+                self.master_id,
+            )
 
     async def async_removed(self) -> None:
         self.apply_self_control()
@@ -174,7 +179,10 @@ class SatelliteRole(StandaloneRole):
             t._self_controlled = OperationMode.SELF
             t._hvac_on.master_delay = 0
             self._sat_id = 0
-            t._async_routine_controller()
+            if t._loop_controller:
+                t._async_routine_controller()
+            if t._loop_pwm:
+                t._async_routine_pwm()
             t._async_cancel_pwm_routines(end_stuck_loop=True)
             t._pwm_start_time = time.time() + CONTROL_START_DELAY
 

@@ -110,6 +110,7 @@ from .platform_schema import PLATFORM_SCHEMA  # noqa: F401
 from .master_role import MasterRole
 from .satellite_role import SatelliteRole
 from .standalone_role import StandaloneRole
+from .zone_registry import async_get_registry
 
 ERROR_STATE = [STATE_UNAVAILABLE, STATE_UNKNOWN, STATE_PROBLEM]
 NOT_SUPPORTED_SWITCH_STATES = [STATE_OPEN, STATE_OPENING, STATE_CLOSED, STATE_CLOSING]
@@ -260,6 +261,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         self._pwm_start_time = None
         self.control_output = {ATTR_CONTROL_OFFSET: 0, ATTR_CONTROL_PWM_OUTPUT: 0}
         self._self_controlled = OperationMode.SELF
+        self._registry_id: str | None = None
 
         self._attr_name = name
         self._master_entity_id = master_entity_id
@@ -340,6 +342,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         """
         self._logger.info("Add thermostat to hass")
         await super().async_added_to_hass()
+        self._registry_id = self.entity_id
         await self._role.async_added()
 
         # Add listeners to track changes from the temp sensor
@@ -454,6 +457,17 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         """Drop zone membership when the entity is unloaded."""
         await self._role.async_removed()
         await super().async_will_remove_from_hass()
+
+    @callback
+    def async_registry_entry_updated(self) -> None:
+        """Follow entity_id changes so zone membership stays valid."""
+        super().async_registry_entry_updated()
+        old_id = self._registry_id
+        new_id = self.entity_id
+        if not old_id or old_id == new_id:
+            return
+        async_get_registry(self.hass).rekey_entity(old_id, new_id)
+        self._registry_id = new_id
 
     def restore_old_state(self, old_state) -> None:
         """Restore old state/config."""
@@ -845,7 +859,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             self._loop_controller()
             self._loop_controller = None
         elif interval is None:
-            self._logger.warning("No control loop to stop")
+            self._logger.debug("No control loop to stop")
 
         if interval and self._loop_controller is None:
             self._logger.debug("Define new control loop")
@@ -881,7 +895,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             self._loop_pwm()
             self._loop_pwm = None
         elif interval is None:
-            self._logger.warning("No pwm loop to stop")
+            self._logger.debug("No pwm loop to stop")
 
         if interval and self._loop_pwm is None:
             self._logger.debug("Define new pwm update routine")

@@ -67,6 +67,32 @@ class ZoneRegistry:
         for sat in list(self.satellites(master.entity.entity_id).values()):
             master.enroll_satellite(sat)
 
+    def rekey_entity(self, old_id: str, new_id: str) -> None:
+        """Follow an entity_id change for a master or satellite."""
+        if old_id == new_id:
+            return
+        if master := self.masters.get(old_id):
+            self.masters.pop(old_id)
+            self.masters[new_id] = master
+            if old_id in self.members:
+                dest = self.members[new_id]
+                dest.update(self.members.pop(old_id))
+                for sat in dest.values():
+                    sat.master_id = new_id
+            for sat in list(self.satellites(new_id).values()):
+                master.enroll_satellite(sat)
+            return
+        for master_id, group in self.members.items():
+            if old_id not in group:
+                continue
+            sat = group.pop(old_id)
+            group[new_id] = sat
+            if master := self.master(master_id):
+                master.enroll_satellite(sat)
+            return
+
     def unregister_master(self, master: MasterRole) -> None:
         """Drop the master role; satellite membership stays."""
-        self.masters.pop(master.entity.entity_id, None)
+        for key, current in list(self.masters.items()):
+            if current is master:
+                self.masters.pop(key, None)
