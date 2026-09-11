@@ -15,7 +15,6 @@ import numpy as np
 
 from . import DOMAIN
 from .const import (
-    ATTR_CONTROL_OFFSET,
     ATTR_CONTROL_PWM_OUTPUT,
     ATTR_ROOMS,
     ATTR_ROUNDED_PWM,
@@ -43,6 +42,7 @@ class Nesting:
         min_load: float,
         pwm_threshold: float,
         min_prop_valve_opening: float,
+        pwm_resolution: float = 1.0,
     ) -> None:
         """Prepare nesting config.
 
@@ -58,6 +58,7 @@ class Nesting:
         self.pwm_threshold = pwm_threshold / self.master_pwm * NESTING_MATRIX
         self.min_prop_valve_opening = min_prop_valve_opening * NESTING_MATRIX
         self.area_scale = NESTING_MATRIX / max(float(tot_area), 1.0)
+        self.pwm_resolution = pwm_resolution
 
         self.packed = []
         self.scale_factor = {}
@@ -72,10 +73,6 @@ class Nesting:
         # proportional valves
         self.prop_pwm = []
         self.prop_area = []
-
-    def set_tot_area(self, tot_area: float) -> None:
-        """Update nesting scale when registered satellite area changes."""
-        self.area_scale = NESTING_MATRIX / max(float(tot_area), 1.0)
 
     @property
     def load_on_off(self):
@@ -715,8 +712,8 @@ class Nesting:
 
         return self.offset
 
-    def get_master_output(self) -> dict:
-        """Control ouput (offset and pwm) for master."""
+    def get_master_output(self) -> tuple[float, float]:
+        """Return (offset, pwm duration) for the plant in master PWM scale."""
         end_time = 0
         end_time_prop = 0
         master_offset = None
@@ -775,11 +772,11 @@ class Nesting:
 
         end_time = max(end_time, end_time_prop) / self.master_pwm_scale
         master_offset /= self.master_pwm_scale
+        pwm = end_time - master_offset
+        step = self.master_pwm / self.pwm_resolution if self.pwm_resolution else 1
+        pwm = _round_to_step(pwm, step)
         self._logger.debug("master start '%s'; end '%s", master_offset, end_time)
-        return {
-            ATTR_CONTROL_OFFSET: master_offset,
-            ATTR_CONTROL_PWM_OUTPUT: end_time - master_offset,
-        }
+        return master_offset, pwm
 
     def remove_room(self, room: str) -> None:
         """Remove room from nesting when room changed hvac mode.
@@ -928,3 +925,12 @@ class Nesting:
                     self.update_nesting(
                         pack_i, room_i, index_start, index_end, free_space
                     )
+
+
+def _round_to_step(value: float, step: float) -> float:
+    """Round value to the nearest multiple of step."""
+    if step <= 0:
+        return value
+    scaled = value / step
+    rounded = np.ceil(scaled) if scaled % 1 >= 0.5 else np.floor(scaled)
+    return float(rounded * step)

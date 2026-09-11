@@ -87,18 +87,6 @@ def register_services(custom_presets):
     )
 
     platform.async_register_entity_service(  # type: ignore
-        "satelite_mode",
-        {
-            vol.Required(ATTR_CONTROL_MODE): vol.Coerce(OperationMode),
-            vol.Optional(ATTR_CONTROL_OFFSET): vol.Coerce(float),
-            vol.Optional("sat_id"): vol.Coerce(int),
-            vol.Optional("pwm_start_time"): vol.Coerce(float),
-            vol.Optional("master_delay"): vol.Coerce(float),
-        },
-        "async_set_satelite_mode",
-    )
-
-    platform.async_register_entity_service(  # type: ignore
         "stuck_prevention",
         {
             vol.Optional("force", default=False): cv.boolean,

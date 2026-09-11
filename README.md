@@ -3,7 +3,7 @@
 # custom_components/multizone_thermostat
 see also https://community.home-assistant.io/t/multizone-thermostat-incl-various-control-options
 
-This is a home assistant custom component. It is a thermostat including various control options, such as: on-off, PID, weather controlled. The thermostat can be used in stand-alone mode or as zoned heating (master with satellites).
+This is a home assistant custom component. It is a thermostat including various control options, such as: on-off, PID, weather controlled. The thermostat can be used in stand-alone mode or as zoned heating (a Select heating circuit with room climates).
 
 Note:
 This is only the required software to create a (zoned) thermostat. Especially zoned heating systems will affect the flow in your heating system vy closing and opening valves. Please check your heating system if modifications are requried to handle the flow variations, such as: pump settings, bypass valves etc.
@@ -60,18 +60,20 @@ high temperature radiator:
 # Operation modes
 The multizone thermostat can operate in two modes:
 - thermostats can operate stand-alone, thus without interaction with others
-- thermostats can operate under the control of a master controller scheduling and balancing the heat request
+- thermostats can operate under a heating-circuit Select (`heat` / `cool` / `standby` / `uncoordinated`) that schedules and balances the heat request
 
-Per room a thermostat needs to be configured. A thermostat can operate by either hyesteris (on-off mode) or proportional mode (weather compensation and PID mode). The PID and weather compensation can be combined or one of both can be used. Only a satellite operating in proportional mode can be used as satellite as hysteris operation (on-off by a dT) cannot run in synchronised mode with other satellites and the master.
+Per room a climate thermostat needs to be configured. A thermostat can operate by either hysteris (on-off mode) or proportional mode (weather compensation and PID mode). The PID and weather compensation can be combined or one of both can be used. Only a room operating in proportional mode can join a circuit; hysteris operation (on-off by a dT) cannot run in synchronised mode with other rooms.
 
-When a master controller is included it will coordinate valve opening for satellites that set `master:` to that master's entity_id. When the master hvac mode is heat or cool it will bind those satellites and sync their controllers. When the master is switched off the satellites stay registered but return to stand-alone control. YAML order of master vs satellites does not matter.
+When a circuit Select is included, rooms that set `master:` to that select entity_id register themselves. Option `heat` or `cool` nests those rooms and PWM-switches the plant entity. Option `standby` closes valves (anti-calc still runs). Option `uncoordinated` leaves rooms on their own PWM window with offset 0. YAML order of circuit vs rooms does not matter. If the configured Select is missing after startup, the room logs an error and runs locally.
+
+`pwm_duration` should be a **multiple** of `control_interval`. The circuit owns the PWM window (epoch). Rooms run PID at `control_interval` inside that window for the next epoch's demand; valves are not rescheduled mid-window. If `control_interval >= pwm_duration`, there are no in-window PID ticks. Floor heating can keep 5 min PID and 15 min PWM; a slow system can set both to 15 min.
 
 # Examples
 See the examples folder for examples. 
 The '\examples\multizone thermostat - explained.yaml' shows an worked-out multizone example including explanation.
 The '\examples\single thermostat - on_off.yaml' shows an worked-out single operating hysteris thermostat with explanation.
 
-# Room thermostat configuration (not for master config)
+# Room thermostat configuration (not for the heating-circuit Select)
 This thermostat is used for satellite or stand-alone operation mode. 
 The thermostat can be configured for a wide variation of hardware specifications and options:
 - Operation for heating and cool are specified indiviually
@@ -84,10 +86,10 @@ The thermostat can be configured for a wide variation of hardware specifications
 
 ## Thermostat configuration
 * platform (Required): 'multizone_thermostat'
-* name (Required): Name of thermostat. The climate entity_id is derived from this name (and unique_id), including the master.
+* name (Required): Name of thermostat. The climate entity_id is derived from this name (and unique_id).
 * unique_id (Optional): specify name for entity in registry else unique name is based on specified sensors and switches
-* master (Optional): Full climate entity_id of the master, e.g. `climate.master`. If set, this thermostat registers as a satellite. Omit for stand-alone or for the master itself.
-* room_area (Optional): Floor area of this room. Required when `master:` is set (used for nesting). The master sums registered satellite areas; do not set a total on the master. Default = 0
+* master (Optional): Full Select entity_id of the heating circuit, e.g. `select.heizung_master`. If set, this thermostat registers as a room on that circuit. Omit for stand-alone.
+* room_area (Optional): Floor area of this room. Required when `master:` is set (used for nesting). The circuit sums registered room areas. Default = 0
 
 sensors (at least one sensor needs to be specified):
 * sensor (Optional): entity_id of the temperature sensor, sensor.state must be temperature (float). Not required when running in weather compensation only.
@@ -104,8 +106,8 @@ checks for sensor and switch:
 * sensor_stale_duration (Optional): safety routine "emergency mode" to turn switches off when sensor has not updated for a specified time period. Specify time period. Activation of emergency mode is visible via a forced climate preset state. Default is not activated. 
 * passive_switch_check (Optional): Enable stuck-valve / anti-calc checks. Idle time is `passive_switch_duration` per HVAC mode. Default = False.
 * passive_switch_check_time (Optional): Time of day to run the check. Default 02:00. Format HH:MM.
-  - Stand-alone satellite: each thermostat flushes its own valve at this time.
-  - Master (HVAC heat/cool): the master builds a queue of idle satellites and flushes them **one after another**. Satellites under master control do not run their own daily check; their `passive_switch_check_time` is only used when the master is `off` (stand-alone fallback).
+  - Stand-alone / uncoordinated: each thermostat flushes its own valve at this time.
+  - Circuit (`heat`/`cool`/`standby`): the Select builds a queue of idle rooms and flushes them **one after another**. Rooms under a coordinated circuit do not run their own daily check; their `passive_switch_check_time` is only used without a circuit or in `uncoordinated`.
   - PWM heating of other rooms continues during a flush. The flushed valve is protected (`stuck_loop` / `anti_calc_active`) so PWM cannot close it early.
 
 recovery of settings
@@ -115,7 +117,7 @@ recovery of settings
 
 ### HVAC modes: heat or cool (sub entity config)
 The control is specified per hvac mode (heat, cool). At least 1 to be included.
-EAch HVAC mode should include one of the control modes: on-off, proportional or master.
+EAch HVAC mode should include one of the control modes: on-off or proportional.
 
 Generic HVAC mode setting:
 * entity_id (Required): This can be an on-off switch or a proportional valve(input_number, etc)
@@ -127,12 +129,12 @@ Generic HVAC mode setting:
 * extra_presets (Optional): A list of custom presets. Needs to be in to form of a list of name and value. Defining 'extra_presets' will make away preset available. default no preset mode available. Built-in presets `none`, `standby` and `emergency` do not need to be listed here.
 
 * passive_switch_duration (Optional): Maximum idle time before a valve is flushed. Specify a time period. Default is not activated.
-  - Satellite (stand-alone): applies to that valve.
-  - Master: idle threshold used when selecting which satellites to flush. The master's own switch (often an `input_boolean`) is **not** toggled for anti-calc.
+  - Room (stand-alone / uncoordinated): applies to that valve.
+  - Circuit: idle threshold used when selecting which rooms to flush. The circuit's own switch (often an `input_boolean`) is **not** toggled for anti-calc.
 * passive_switch_opening_time (Optional): How long to keep the valve open during a flush. Default 1 minute.
-  - Satellite: duration of that valve's flush (also used by `stuck_prevention` on the satellite).
-  - Master: delay before starting the **next** satellite (`opening_time + gap`). Keep this equal to the satellite opening time so flushes do not overlap unless `gap` is negative.
-* passive_switch_gap (Optional): Extra delay between sequential master flushes, added to `passive_switch_opening_time`. Default 0. May be negative (overlap / thermal actuator lag). Must not be smaller than `-passive_switch_opening_time` (that value starts all due circuits at once).
+  - Room: duration of that valve's flush (also used by `stuck_prevention` on the climate).
+  - Circuit: delay before starting the **next** room (`opening_time + gap`). Keep this equal to the room opening time so flushes do not overlap unless `gap` is negative.
+* passive_switch_gap (Optional): Extra delay between sequential circuit flushes, added to `passive_switch_opening_time`. Default 0. May be negative (overlap / thermal actuator lag). Must not be smaller than `-passive_switch_opening_time` (that value starts all due circuits at once).
 
 
 #### on-off mode (Optional) (sub of hvac mode)
@@ -152,8 +154,8 @@ Two control modes are included to control the proportional thermostat. A single 
 The proportional controller is called periodically and specified by control_interval.
 If no PWM interval is defined, it will set the state of "heater" from 0 to "PWM_scale" value as for a proportional valve. Else, when "PWM_duration" is specified it will operate in on-off mode and will switch proportionally with the PWM signal.
 
-* control_interval (Required): interval that controller is updated. The satellites should have a control_interval equal to the master or the master control_interval should be dividable by the satellite control_interval. Specify a time period.
-* PWM_duration (Optional): Set period time for PWM signal. If it's not set, PWM is sending proportional value to switch. Specify a time period. For a on-off valve the control_interval should be equal or multiplication of the "control_interval". Default = 0 (proportional valve)
+* control_interval (Required): interval that the PID/weather controller is updated inside a PWM window. `pwm_duration` should be a multiple of `control_interval`. Specify a time period.
+* PWM_duration (Optional): Set period time for PWM signal. If it's not set, PWM is sending proportional value to switch. Specify a time period. For an on-off valve `pwm_duration` should be a multiple of `control_interval`. Default = 0 (proportional valve)
 * PWM_scale (Optional): Set analog output offset to 0. Example: If it's 500 the output value can be between 0 and 500. Proportional valve might have 99 as upper max, use 99 in such case. Default = 100
 * PWM_resolution (optional): Set the resolution of the PWM_scale between min and max difference. Default = 50 (50 steps between 0 and PWM_scale)
 * PWM_threshold (Optional): Set the minimal difference before activating switch. To avoid very short off-on-off or on-off-on changes. Default is not acitvated
@@ -196,68 +198,59 @@ with the data (as sub):
 * PWM_scale_low (Optional): Overide lower bound PWM scale for this mode. Default = PWM_scale * -1
 * PWM_scale_high (Optional): Overide upper bound PWM scale for this mode. Default = 'PWM_scale'
 
-# Master configuration
-The configuration scheme is similar as for a satellite only with the following differences.
+# Heating-circuit Select
+The circuit is a `select` entity, not a climate. Breaking change: `climate.heizung_master` → `select.heizung_master`. Rooms set `master: select.…`.
 
-* name: Freely chosen. Not forced to `master`. Use `unique_id` if you need a stable entity_id such as `climate.master`.
-* room_area: Not set on the master. It is the sum of registered satellites.
-For master mode not applicable
-* sensor
-* filter_mode
-* sensor_out
-* precision
-* sensor_stale_duration
+Options:
+* `heat` — coordinated heating (nesting + plant PWM)
+* `cool` — coordinated cooling
+* `standby` — plant out of climate service (valves closed, anti-calc still runs)
+* `uncoordinated` — rooms run their own PWM window with offset 0
 
-## HVAC modes: heat or cool (sub entity config)
-The control is specified per hvac mode (heat, cool). At least 1 to be included.
-EAch HVAC mode should include one of the control modes: on-off, proportional or master.
+Attributes: `satellites`, `total_area`, PWM offset/output, `anti_calc_active` (bool). The heat request stays the YAML switch (`entity_id`), PWM'd by the circuit. The anti-calc queue is in memory only and is not restored after a Home Assistant restart.
 
-Generic HVAC mode setting:
-For master mode not applicable:
-* min_target_temp
-* max_target_temp
-* initial_target_temp
+Rooms keep their own presets (`none`, `standby`, `emergency`, or a name from `extra_presets`). Circuit option changes are not copied onto rooms. Room `standby` silences only that room.
 
-### on-off mode (Optional) (sub of hvac mode)
-For master mode not applicable
+```yaml
+select:
+  - platform: multizone_thermostat
+    name: Heizung Master
+    unique_id: heizung_master
+    entity_id: input_boolean.heizanforderung_fbh
+    switch_mode: NC
+    supported_modes:
+      - heat
+    initial_option: heat
+    restore_from_old_state: true
+    operation_mode: balanced
+    pwm_duration:
+      minutes: 15
+    pwm_scale: 100
+    pwm_resolution: 50
+    pwm_threshold: 5
+    lower_load_scale: 0.15
+    min_opening_for_propvalve: 0
+    compensate_valve_lag:
+      seconds: 30
+    passive_switch_check: true
+    passive_switch_check_time: "13:00"
+    passive_switch_duration:
+      days: 15
+    passive_switch_opening_time:
+      minutes: 5
+```
 
-### proportional mode (Optional) (sub of hvac mode)
-For master mode not applicable
-
-### Master configuration (Required) (sub of hvac mode)
-Specify the control of the satellites. Configured under 'master_mode:'
-
-Satellites with `master: climate.<this_master>` register themselves. The heat or cool requirement will be read from the satellites and are processed to determine master valve opening and adjust timing of satellite openings. 
-
-The master will check satellite states and group them in on-off and proportional valves. The govering group will define the opening time of the master valve.  
-
-Satellites keep and persist their own presets (`none`, `standby`, `emergency`, or a name from `extra_presets`). Master preset changes are not copied onto satellites. Each satellite reads the master's preset on its control cycle: master `standby`/`emergency` yields no valve opening from the next cycle.
-
-Built-in preset `standby` (HVAC mode stays `heat` or `cool`): no heat or cool request to the switch, PID is frozen, anti-calc still runs. On the master this takes the whole plant out of climate service (e.g. DHW-only) without changing room presets. On a satellite, `standby` silences only that room while the master is in climate service. Master HVAC `off` is unchanged: satellites return to stand-alone control.
-
-Master attributes during a coordinated flush:
-* `anti_calc_active` (bool)
-* `anti_calc_satellite` (current satellite entity_id)
-* `anti_calc_queue` (remaining entity_ids)
-
-Satellites expose `anti_calc_active` as well (true while that valve's `stuck_loop` flush is running, including stand-alone).
-
-The master can operate in 'minimal_on', 'balanced' or 'continuous' mode. This will determine the satellite timing scheduling. For the minimal_on mode the master valve is opened as short as possible, for balanced mode the opening time is balanced between heating power and duration and for continuous mode the valve opening time is extended as long as possible. All satellite valves operating as on-off switch are used for the nesting are scheduled in time to get a balanced heat requirement. In 'continuous' mode the satellite timing is scheduled aimed such that a continuous heat requirement is created. The master valve will be opened continuous when sufficient heat is needed. In low demand conditions an on-off mode is maintained. 
-
-The controller is called periodically and specified by control_interval.
-If no PWM interval is defined, it will set the state of "heater" from 0 to "PWM_scale" value as for a proportional valve. Else, when PWM is specified it will operate in on-off mode and will switch proportionally with the PWM signal.
-
-with the data (as sub):
-* operation_mode (Optional): satellite nesting method: "minimal_on", "balanced" or "continuous". Default = "balanced"
-* lower_load_scale (Optional): For nesting assumed minimum required load heater. Default = 0.15. (a minimum heating capacity of 15%  assumed based on 100% when all rooms required heat)
-* control_interval (Required): interval that controller is updated. The satellites should have a control_interval equal to the master or the master control_interval should be dividable by the satellite control_interval. Specify a time period.
-* PWM_duration (Optional): Set period time for PWM signal. If it's not set, PWM is sending proportional value to switch. Specify a time period. Default = 0
-* PWM_scale (Optional): Set analog output offset to 0. Example: If it's 500 the output value can be between 0 and 500. Default = 100
-* PWM_resolution (optional): Set the resolution of the PWM_scale between min and max difference. Default = 50 (50 steps between 0 and 100)
-* PWM_threshold (Optional): Set the minimal difference before activating switch. To avoid very short off-on-off or on-off-on changes. Default is not acitvated
-* min_opening_for_propvalve (optional): Set the minimal percentage (between 0 and 1) active PWM when a proportional valve requires heat. Default 0 (* PWM_scale)
-* compensate_valve_lag (optional): Delay the opening of the master valve to assure that flow is guaranteed. Specify a time period. Default no delay.
-
+* entity_id (Required): plant switch or heat-request helper
+* switch_mode (Optional): NC or NO. Default NC
+* supported_modes (Optional): `heat` and/or `cool`. `standby` and `uncoordinated` are always added. Default `[heat]`
+* initial_option (Optional): Default `heat`
+* operation_mode (Optional): nesting method `minimal_on`, `balanced` or `continuous`. Default `balanced`
+* lower_load_scale (Optional): minimum assumed heater load. Default 0.15
+* pwm_duration (Optional): PWM window. Nesting runs once per window, not as a sliding 15 min from now. Should be a multiple of each room's `control_interval`
+* pwm_scale / pwm_resolution / pwm_threshold: same meaning as on a room
+* min_opening_for_propvalve (Optional): minimum plant PWM when a proportional valve needs heat. Default 0
+* compensate_valve_lag (Optional): delay plant opening so room valves open first. Default none
+* passive_switch_*: sequential anti-calc on member rooms. The plant switch is not toggled for anti-calc
 
 # Sensor filter (filter_mode):
 An unscented kalman filter is present to smoothen the temperature readings in case of of irregular updates. This could be the case for battery operated temperature sensors such as zigbee devices. This can be usefull in case of PID controller where derivative is controlled (speed of temperature change).
@@ -274,12 +267,12 @@ logger:
     multizone_thermostat: debug
 ```    
 # Services callable from HA:
-Several services are included to change the active configuration of a satellite or master.
-Preset `standby` can also be set with the standard Home Assistant service `climate.set_preset_mode`.
+Several services are included to change the active configuration of a room climate or the heating-circuit Select.
+Room preset `standby` can also be set with the standard Home Assistant service `climate.set_preset_mode`. Circuit mode is set with `select.select_option`.
 ## set_mid_diff / pwm_threshold:
 Change the 'minimal_diff' / PWM threshold before the switch is operated
 ## set_preset_mode:
-Change the preset (`none`, `standby`, `emergency`, or a name from `extra_presets`). Master `standby`/`emergency` is observed by satellites on their next control cycle; room presets are not overwritten.
+Change the room preset (`none`, `standby`, `emergency`, or a name from `extra_presets`). Circuit `standby` is a Select option and does not overwrite room presets.
 ## set_pid:
 Change the current kp, ki, kd values of the PID or Valve PID controller
 ## set_integral:
@@ -291,4 +284,4 @@ change the UKF filter level for the temperature sensor
 ## detailed_output:
 Control the attribute output for PID-, WC-contributions and control output
 ## stuck_prevention:
-Open a satellite valve briefly to prevent sticking (anti-calc). On the master this starts the sequential satellite flush. Optional `force: true` on the master ignores the idle timer and queues all satellites that are not currently heating.
+Open a room valve briefly to prevent sticking (anti-calc). On the circuit Select this starts the sequential flush. Optional `force: true` on the circuit ignores the idle timer and queues all rooms that are not currently heating.

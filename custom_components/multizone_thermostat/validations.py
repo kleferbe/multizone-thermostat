@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 import voluptuous as vol
@@ -7,19 +7,17 @@ import voluptuous as vol
 from homeassistant.components.climate import HVACMode
 
 from .const import (
-    CONF_CONTROL_REFRESH_INTERVAL,
     CONF_EXTRA_PRESETS,
     CONF_FILTER_MODE,
     CONF_INITIAL_HVAC_MODE,
     CONF_INITIAL_PRESET_MODE,
-    CONF_MASTER_MODE,
+    CONF_MASTER,
     CONF_ON_OFF_MODE,
     CONF_PASSIVE_CHECK_TIME,
     CONF_PASSIVE_SWITCH_GAP,
     CONF_PASSIVE_SWITCH_OPEN_TIME,
     CONF_PID_MODE,
     CONF_PROPORTIONAL_MODE,
-    CONF_PWM_DURATION,
     CONF_SENSOR,
     CONF_SENSOR_OUT,
     CONF_WC_MODE,
@@ -107,33 +105,25 @@ def validate_initial_sensors(*keys: str) -> Callable:
                                 hvac_mode
                             )
                         )
-                if CONF_MASTER_MODE in obj[hvac_mode]:
-                    pwm_duration = timedelta(
-                        seconds=obj[hvac_mode][CONF_MASTER_MODE][CONF_PWM_DURATION].get(
-                            "seconds", 0
-                        ),
-                        hours=obj[hvac_mode][CONF_MASTER_MODE][CONF_PWM_DURATION].get(
-                            "hours", 0
-                        ),
-                    )
-                    cntrl_duration = timedelta(
-                        seconds=obj[hvac_mode][CONF_MASTER_MODE][
-                            CONF_CONTROL_REFRESH_INTERVAL
-                        ].get("seconds", 0),
-                        hours=obj[hvac_mode][CONF_MASTER_MODE][
-                            CONF_CONTROL_REFRESH_INTERVAL
-                        ].get("hours", 0),
-                    )
-                    if pwm_duration.seconds > 0 and pwm_duration != cntrl_duration:
-                        raise vol.Invalid(
-                            "Master mode {} ({} sec) not equal {} ({} sec)".format(
-                                str(CONF_PWM_DURATION),
-                                pwm_duration.seconds,
-                                str(CONF_CONTROL_REFRESH_INTERVAL),
-                                cntrl_duration.seconds,
-                            ),
-                        )
+        return obj
 
+    return validate
+
+
+def validate_circuit_member(*keys: str) -> Callable:
+    """On-off rooms cannot join a heating circuit."""
+
+    def validate(obj: dict[str, Any]) -> dict[str, Any]:
+        """Check this condition."""
+        if CONF_MASTER not in obj:
+            return obj
+        for hvac_mode in [HVACMode.HEAT, HVACMode.COOL]:
+            if hvac_mode in obj and CONF_ON_OFF_MODE in obj[hvac_mode]:
+                raise vol.Invalid(
+                    "on-off control cannot be a circuit member (master: {})".format(
+                        obj[CONF_MASTER]
+                    )
+                )
         return obj
 
     return validate

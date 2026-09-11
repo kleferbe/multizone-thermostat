@@ -21,7 +21,7 @@ set_preset_mode:
   fields:
     entity_id:
       description: Thermostat entity_id
-      example: climate.master
+      example: climate.study
     hvac_mode:
       description: hvac mode
       example: heat or cool
@@ -96,29 +96,6 @@ set_filter_mode:
       description: mode of filter (integral)
       example: 5
 
-# controlled by master
-satelite_mode:
-  description: Set satelite under control of master
-  fields:
-    entity_id:
-      description: Thermostat entity_id
-      example: climate.study
-    control_mode:
-      description: True(under control of master), False(not), None (no change)
-      example: True
-    pwm_time:
-      description: interval time for pwm cycle
-      example: 50
-    offset:
-      description: time offset to delay start in seconds
-      example: 18
-    pwm_timer:
-      description: reference start time
-      example: 1161611
-    master_delay:
-      description: master valve opening delay
-      example: 60
-
 detailed_output:
   description: Include detailed output (PID, control output) in attributes
   fields:
@@ -134,12 +111,12 @@ detailed_output:
 
 stuck_prevention:
   name: Stuck prevention (anti-calc)
-  description: Open the valve briefly to prevent sticking. On the master this starts a sequential satellite flush. PWM will not close a satellite valve while stuck_loop is active.
+  description: Open the valve briefly to prevent sticking. On the heating-circuit Select this starts a sequential satellite flush. PWM will not close a satellite valve while stuck_loop is active.
   fields:
     entity_id:
-      description: Satellite to flush, or the master to start the coordinated sequence
-      example: climate.master
+      description: Room climate to flush, or the circuit Select to start the coordinated sequence
+      example: select.heizung_master
     force:
-      description: On the master, flush all idle satellites regardless of last switch change
+      description: On the circuit, flush all idle rooms regardless of last switch change
       example: true
 

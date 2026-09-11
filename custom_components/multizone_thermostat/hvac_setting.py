@@ -6,24 +6,20 @@ import time
 import numpy as np
 
 from homeassistant.components.climate import (
-    ATTR_HVAC_MODE,
     ATTR_PRESET_MODE,
     PRESET_NONE,
     HVACMode,
 )
 from homeassistant.const import ATTR_TEMPERATURE, CONF_ENTITY_ID
-from homeassistant.core import State
 from homeassistant.helpers.typing import ConfigType
 
-from . import DOMAIN, pid_controller, pwm_nesting
+from . import DOMAIN, pid_controller
 from .const import (
     ATTR_CONTROL_MODE,
     ATTR_CONTROL_OFFSET,
     ATTR_CONTROL_OUTPUT,
     ATTR_CONTROL_PWM_OUTPUT,
     ATTR_DETAILED_OUTPUT,
-    ATTR_EMERGENCY_MODE,
-    ATTR_HVAC_DEFINITION,
     ATTR_KA,
     ATTR_KB,
     ATTR_KD,
@@ -31,10 +27,7 @@ from .const import (
     ATTR_KP,
     ATTR_LAST_SWITCH_CHANGE,
     ATTR_SAT_ALLOWED,
-    ATTR_SELF_CONTROLLED,
     ATTR_STUCK_LOOP,
-    ATTR_UPDATE_NEEDED,
-    CONF_AREA,
     CONF_CONTINUOUS_LOWER_LOAD,
     CONF_CONTROL_REFRESH_INTERVAL,
     CONF_EXTRA_PRESETS,
@@ -58,7 +51,6 @@ from .const import (
     CONF_PWM_SCALE_HIGH,
     CONF_PWM_SCALE_LOW,
     CONF_PWM_THRESHOLD,
-    CONF_SATELITES,
     CONF_SENSOR_OUT,
     CONF_SWITCH_MODE,
     CONF_TARGET_TEMP_INIT,
@@ -70,8 +62,6 @@ from .const import (
     PRESET_EMERGENCY,
     PRESET_RESTORE,
     PRESET_STANDBY,
-    PWM_UPDATE_CHANGE,
-    OperationMode,
 )
 
 
@@ -162,10 +152,6 @@ class HVACSetting:
             if self.is_wc_mode:
                 self._logger.debug("Init 'weather control' settings")
                 self._wc[ATTR_CONTROL_PWM_OUTPUT] = 0
-        if self.is_hvac_master_mode:
-            self._logger.debug("Setup control mode 'master'")
-            self._pwm_threshold = self._master[CONF_PWM_THRESHOLD]
-            self.start_master(reset=True)
 
     def calculate(
         self, routine: bool = False, force: bool = False, current_offset: float = 0
@@ -191,44 +177,6 @@ class HVACSetting:
                         < 0
                     ):
                         self.set_integral(-self._wc[ATTR_CONTROL_PWM_OUTPUT])
-
-        elif self.is_hvac_master_mode:
-            # nesting of pwm controlled valves
-            start_time = time.time()
-            if routine:
-                self.nesting.nest_rooms(self._satelites)
-                self.nesting.distribute_nesting()
-                forced_nest = True
-            # update nesting length only to avoid too large shifts
-            else:
-                self.nesting.check_pwm(self._satelites, dt=current_offset)
-                forced_nest = False
-            # TODO check offsets when thermostat setpoint is raised
-            #  - check offset (input val offset)
-            #  - excl other rooms
-
-            new_offsets = self.nesting.get_nesting()
-            if new_offsets:
-                self.set_satelite_offset(new_offsets, forced=forced_nest)
-
-            self._logger.debug(
-                "Control calculation dt %.4f sec", time.time() - start_time
-            )
-
-    def start_master(self, reset: bool = False) -> None:
-        """Init the master mode."""
-        if reset:
-            self._satelites = {}
-
-        self.nesting = pwm_nesting.Nesting(
-            self._name,
-            operation_mode=self._operation_mode,
-            master_pwm=self.pwm_scale,
-            tot_area=max(self.area, 1.0),
-            min_load=self.get_min_load,
-            pwm_threshold=self.pwm_threshold,
-            min_prop_valve_opening=self.get_min_valve_opening,
-        )
 
     def start_pid(self) -> None:
         """Init the PID controller."""
@@ -320,8 +268,8 @@ class HVACSetting:
                 current, setpoint, force=force
             )
 
-    def get_control_master(self) -> float:
-        """Master pwm based on nesting of satelites for pwm controlled on-off valves."""
+    def get_control_master(self) -> tuple[float, float]:
+        """Master offset and pwm from satellite nesting."""
         return self.nesting.get_master_output()
 
     def calc_control_output(self) -> dict:
@@ -342,9 +290,7 @@ class HVACSetting:
         elif self.is_hvac_master_mode:
             # Determine valve opening for master valve based on satelites running in
             # proportional hvac mode
-            master_output = self.get_control_master()
-            self.time_offset = master_output[ATTR_CONTROL_OFFSET]
-            control_output = master_output[ATTR_CONTROL_PWM_OUTPUT]
+            self.time_offset, control_output = self.get_control_master()
 
         if self.is_hvac_master_mode or self.is_hvac_proportional_mode:
             if control_output > self.pwm_scale:
@@ -614,19 +560,6 @@ class HVACSetting:
         if self.is_hvac_on_off_mode:
             raise ValueError("min diff cannot be set for on-off controller")
         self._pwm_threshold = new_threshold
-        if self.is_hvac_master_mode:
-            self.start_master()
-
-    def close_to_routine(self, offset):
-        """Check if offset is close to routine or when there is not enough time to open."""
-        close_to = True
-        if offset < 1:
-            time_left = (1 - offset) * self.get_pwm_time
-            threshold = self.pwm_threshold / self.pwm_scale * self.get_pwm_time
-            if time_left - self.compensate_valve_lag > threshold:
-                close_to = False
-
-        return close_to
 
     @property
     def get_operate_cycle_time(self) -> datetime.datetime:
@@ -804,97 +737,6 @@ class HVACSetting:
         """
         return self._master[CONF_CONTINUOUS_LOWER_LOAD]
 
-    def set_registered_satelites(self, entity_ids: list[str]) -> None:
-        """Store membership from the zone registry (full entity_ids)."""
-        self._registered_satelites = list(entity_ids)
-
-    def update_area(self, area: float) -> None:
-        """Update heated area used for nesting."""
-        self.area = area
-        if self.nesting is not None:
-            self.nesting.set_tot_area(area)
-
-    @property
-    def get_satelites(self) -> list | None:
-        """Return registered satellite entity_ids."""
-        if self.is_hvac_master_mode:
-            return self._registered_satelites
-        return None
-
-    def update_satelite(self, state: State) -> bool:
-        """Set and check new state of satelite."""
-        sat_name = state.entity_id
-        area = state.attributes.get(CONF_AREA)
-        self_controlled = state.attributes.get(ATTR_SELF_CONTROLLED)
-        update = False
-
-        if state.state != self._hvac_mode:
-            self._satelites.pop(sat_name, None)
-            update = True
-        else:
-            preset = state.attributes.get(ATTR_HVAC_DEFINITION)[state.state][
-                ATTR_PRESET_MODE
-            ]
-            control_mode = state.attributes.get(ATTR_HVAC_DEFINITION)[state.state][
-                ATTR_CONTROL_MODE
-            ]
-
-            if (
-                preset in (PRESET_EMERGENCY, PRESET_STANDBY)
-                or self_controlled != OperationMode.MASTER
-                or control_mode != CONF_PROPORTIONAL_MODE
-            ):
-                self._satelites.pop(sat_name, None)
-                update = True
-
-            else:
-                self._logger.debug("Save update from '%s'", state)
-                pwm_time = state.attributes.get(ATTR_HVAC_DEFINITION)[state.state][
-                    CONF_PWM_DURATION
-                ]
-                pwm_scale = state.attributes.get(ATTR_HVAC_DEFINITION)[state.state][
-                    CONF_PWM_SCALE
-                ]
-                setpoint = state.attributes[ATTR_TEMPERATURE]
-                time_offset, control_value = state.attributes.get(ATTR_HVAC_DEFINITION)[
-                    state.state
-                ][ATTR_CONTROL_OUTPUT].values()
-
-                # check if controller update is needed
-                if sat_name in self._satelites:
-                    old_val = self._satelites[sat_name][ATTR_CONTROL_PWM_OUTPUT]
-                    if old_val == 0:
-                        if control_value != 0:
-                            update = True
-                    elif abs((control_value - old_val) / old_val) > PWM_UPDATE_CHANGE:
-                        update = True
-
-                    if setpoint != self._satelites[sat_name][ATTR_TEMPERATURE]:
-                        update = True
-
-                    if self._satelites[sat_name][ATTR_UPDATE_NEEDED]:
-                        update = True
-
-                elif control_value > 0:
-                    update = True
-
-                self._satelites[sat_name] = {
-                    ATTR_HVAC_MODE: state.state,
-                    ATTR_SELF_CONTROLLED: self_controlled,
-                    ATTR_EMERGENCY_MODE: preset,
-                    ATTR_CONTROL_MODE: control_mode,
-                    CONF_PWM_DURATION: pwm_time,
-                    CONF_PWM_SCALE: pwm_scale,
-                    ATTR_TEMPERATURE: setpoint,
-                    CONF_AREA: area,
-                    ATTR_CONTROL_PWM_OUTPUT: control_value,
-                    ATTR_CONTROL_OFFSET: time_offset,
-                    ATTR_UPDATE_NEEDED: update,
-                }
-
-        self._logger.debug("Satellite data requires controller update: %s", update)
-        return update
-
     @property
     def is_satelite_allowed(self) -> bool:
         """Return if satelite mode is allowed.
@@ -905,33 +747,6 @@ class HVACSetting:
             return True
         else:
             return False
-
-    def get_satelite_offset(self) -> dict:
-        """PWM offsets for satelites."""
-        self._logger.debug("get sat offsets")
-        tmp_dict = {}
-        for room, data in self._satelites.items():
-            if data[ATTR_UPDATE_NEEDED] is True:
-                # only reset update for on-off valves
-                # such that prop valves keep scaling to new master pwm
-                data[ATTR_UPDATE_NEEDED] = False
-                tmp_dict[room] = data[ATTR_CONTROL_OFFSET]
-        return tmp_dict
-
-    def restore_satelites(self) -> None:
-        """Remove the satelites and nesting."""
-        self._satelites = {}
-        if self.nesting is not None:
-            self.nesting.satelite_data(self._satelites)
-
-    def set_satelite_offset(self, new_offsets: dict, forced: bool = True) -> None:
-        """Store offset per satelite."""
-        for room, offset in new_offsets.items():
-            if room in self._satelites:
-                # if self._satelites[room][ATTR_CONTROL_OFFSET] != offset or forced_update:
-                if forced or self._satelites[room][ATTR_CONTROL_OFFSET] != offset:
-                    self._satelites[room][ATTR_UPDATE_NEEDED] = True
-                self._satelites[room][ATTR_CONTROL_OFFSET] = offset
 
     @property
     def get_control_mode(self) -> str:
@@ -1016,10 +831,6 @@ class HVACSetting:
         tmp_dict[ATTR_LAST_SWITCH_CHANGE] = self.switch_last_change
         tmp_dict[ATTR_STUCK_LOOP] = self.stuck_loop
         tmp_dict["Open_window"] = open_window
-
-        if self.is_hvac_master_mode:
-            tmp_dict[CONF_SATELITES] = self.get_satelites
-            tmp_dict[CONF_MASTER_OPERATION_MODE] = self._operation_mode
 
         if self.is_hvac_proportional_mode:
             if self.is_prop_pid_mode:

@@ -1,15 +1,14 @@
-"""Membership of satellite roles under a master role, keyed by full entity_id."""
+"""Circuit membership: climate entity_id → Climate object, keyed by current entity_id."""
 
 from __future__ import annotations
 
-from collections import defaultdict
 from typing import TYPE_CHECKING
 
 from . import DOMAIN
 
 if TYPE_CHECKING:
-    from .master_role import MasterRole
-    from .satellite_role import SatelliteRole
+    from .climate import MultiZoneThermostat
+    from .select import CircuitSelect
 
 DATA_REGISTRY = "zone_registry"
 
@@ -23,96 +22,105 @@ def async_get_registry(hass) -> ZoneRegistry:
 
 
 class ZoneRegistry:
-    """Satellites may register before the master role exists."""
+    """YAML is the source of membership. Bind when both entities exist."""
 
     def __init__(self) -> None:
-        self.members: dict[str, dict[str, SatelliteRole]] = defaultdict(dict)
-        self.masters: dict[str, MasterRole] = {}
+        self.climates: dict[str, MultiZoneThermostat] = {}
+        self.circuits: dict[str, CircuitSelect] = {}
+        self.membership: dict[str, str] = {}
+        self.pending: dict[str, str] = {}
 
-    def master(self, master_id: str) -> MasterRole | None:
-        """Return the live master role for an entity_id or climate.<unique_id>."""
-        if found := self.masters.get(master_id):
-            return found
-        for current in self.masters.values():
-            if master_id in self._master_aliases(current):
-                return current
-        return None
+    def climate(self, entity_id: str) -> MultiZoneThermostat | None:
+        """Return a registered room climate."""
+        return self.climates.get(entity_id)
 
-    def _master_aliases(self, master: MasterRole) -> set[str]:
-        aliases = {master.entity.entity_id}
-        if uid := master.entity.unique_id:
-            aliases.add(f"climate.{uid}")
-        return aliases
+    def circuit(self, entity_id: str) -> CircuitSelect | None:
+        """Return a registered heating circuit."""
+        return self.circuits.get(entity_id)
 
-    def satellites(self, master_id: str) -> dict[str, SatelliteRole]:
-        """Registered satellite roles for a master id (may be empty)."""
-        if master := self.master(master_id):
-            return self.satellites_of(master)
-        return self.members.get(master_id, {})
+    def members(self, circuit_id: str) -> list[MultiZoneThermostat]:
+        """Climates currently bound to this circuit, stable order."""
+        ids = sorted(
+            cid for cid, mid in self.membership.items() if mid == circuit_id
+        )
+        return [self.climates[cid] for cid in ids if cid in self.climates]
 
-    def satellites_of(self, master: MasterRole) -> dict[str, SatelliteRole]:
-        """All satellites whose configured master resolves to this role."""
-        out: dict[str, SatelliteRole] = {}
-        for key in self._master_aliases(master):
-            out.update(self.members.get(key, {}))
-        return out
+    def member_ids(self, circuit_id: str) -> list[str]:
+        """Entity ids of climates bound to this circuit."""
+        return [sat.entity_id for sat in self.members(circuit_id)]
 
-    def member_ids(self, master_id: str) -> list[str]:
-        """Stable satellite entity_ids for a master."""
-        return sorted(self.satellites(master_id))
+    def register_climate(self, climate: MultiZoneThermostat) -> None:
+        """Add a room and bind it when its circuit already exists."""
+        self.climates[climate.entity_id] = climate
+        master_id = climate.configured_master
+        if not master_id:
+            return
+        if self.membership.get(climate.entity_id) == master_id:
+            return
+        circuit = self.circuit(master_id)
+        if circuit is not None:
+            self._bind(climate, circuit)
+        else:
+            self.pending[climate.entity_id] = master_id
 
-    def satellite(self, master_id: str, sat_id: str) -> SatelliteRole | None:
-        """Return a registered satellite role."""
-        return self.satellites(master_id).get(sat_id)
+    def unregister_climate(self, climate: MultiZoneThermostat) -> None:
+        """Drop a room. Circuit membership is cleared."""
+        entity_id = climate.entity_id
+        self.climates.pop(entity_id, None)
+        self.pending.pop(entity_id, None)
+        self.membership.pop(entity_id, None)
+        climate.bind_circuit(None)
 
-    def register_satellite(self, sat: SatelliteRole, master_id: str) -> None:
-        """Add a satellite and enroll it with the master when present."""
-        self.members[master_id][sat.entity.entity_id] = sat
-        master = self.master(master_id)
-        if master is not None:
-            master.enroll_satellite(sat)
+    def register_circuit(self, circuit: CircuitSelect) -> None:
+        """Add a circuit and bind rooms that were waiting for it."""
+        self.circuits[circuit.entity_id] = circuit
+        for climate_id, master_id in list(self.pending.items()):
+            if master_id != circuit.entity_id:
+                continue
+            climate = self.climates.get(climate_id)
+            if climate is None:
+                continue
+            self._bind(climate, circuit)
+            self.pending.pop(climate_id, None)
 
-    def unregister_satellite(self, sat: SatelliteRole, master_id: str) -> None:
-        """Remove a satellite and unenroll it from the master when present."""
-        group = self.members.get(master_id)
-        if group:
-            group.pop(sat.entity.entity_id, None)
-        master = self.master(master_id)
-        if master is not None:
-            master.unenroll_satellite(sat)
+    def unregister_circuit(self, circuit: CircuitSelect) -> None:
+        """Drop a circuit. Rooms stay registered and run locally."""
+        circuit_id = circuit.entity_id
+        self.circuits.pop(circuit_id, None)
+        for climate_id, master_id in list(self.membership.items()):
+            if master_id != circuit_id:
+                continue
+            self.membership.pop(climate_id, None)
+            climate = self.climates.get(climate_id)
+            if climate is not None:
+                climate.bind_circuit(None)
+                if climate.configured_master:
+                    self.pending[climate_id] = climate.configured_master
 
-    def register_master(self, master: MasterRole) -> None:
-        """Add a master and enroll satellites already waiting for it."""
-        self.masters[master.entity.entity_id] = master
-        for sat in list(self.satellites_of(master).values()):
-            master.enroll_satellite(sat)
+    def _bind(self, climate: MultiZoneThermostat, circuit: CircuitSelect) -> None:
+        self.membership[climate.entity_id] = circuit.entity_id
+        climate.bind_circuit(circuit)
 
     def rekey_entity(self, old_id: str, new_id: str) -> None:
-        """Follow an entity_id change for a master or satellite."""
+        """Follow an entity_id rename for a climate or a circuit."""
         if old_id == new_id:
             return
-        if master := self.masters.get(old_id):
-            self.masters.pop(old_id)
-            self.masters[new_id] = master
-            if old_id in self.members:
-                dest = self.members[new_id]
-                dest.update(self.members.pop(old_id))
-                for sat in dest.values():
-                    sat.master_id = new_id
-            for sat in list(self.satellites_of(master).values()):
-                master.enroll_satellite(sat)
-            return
-        for master_id, group in self.members.items():
-            if old_id not in group:
-                continue
-            sat = group.pop(old_id)
-            group[new_id] = sat
-            if master := self.master(master_id):
-                master.enroll_satellite(sat)
+
+        if circuit := self.circuits.get(old_id):
+            self.circuits.pop(old_id)
+            self.circuits[new_id] = circuit
+            for climate_id, master_id in list(self.membership.items()):
+                if master_id == old_id:
+                    self.membership[climate_id] = new_id
+            for climate_id, master_id in list(self.pending.items()):
+                if master_id == old_id:
+                    self.pending[climate_id] = new_id
             return
 
-    def unregister_master(self, master: MasterRole) -> None:
-        """Drop the master role; satellite membership stays."""
-        for key, current in list(self.masters.items()):
-            if current is master:
-                self.masters.pop(key, None)
+        if climate := self.climates.get(old_id):
+            self.climates.pop(old_id)
+            self.climates[new_id] = climate
+            if old_id in self.membership:
+                self.membership[new_id] = self.membership.pop(old_id)
+            if old_id in self.pending:
+                self.pending[new_id] = self.pending.pop(old_id)

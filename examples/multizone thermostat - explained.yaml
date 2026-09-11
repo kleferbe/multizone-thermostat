@@ -141,7 +141,7 @@ sensor:
         unit_of_measurement: "°C"
 
       master_pwm:
-        value_template: "{{ state_attr('climate.master','hvac_def')['heat']['control_output']['pwm_out'] | float(0)}}"
+        value_template: "{{ state_attr('select.master','pwm_out') | float(0)}}"
       pid1_pwm:
         value_template: "{{ state_attr('climate.pid1','hvac_def')['heat']['control_output']['pwm_out']}}"
       pid2_pwm:
@@ -221,98 +221,37 @@ switch:
 # Some settings use a default when not included in the configuration. In below examples
 # several parameters are shown with the default which would not have been necessary. These are
 # included for explanatory use only.
-climate:
+select:
 
-  # MASTER - SATELLITE WORKING EXAMPLE
-  # this thermostat synchronizes and coordinates the satellites valve opening
-  # satellites set master: climate.master (this entity's id from name: master)
+  # HEATING CIRCUIT
+  # coordinates satellite valve opening via PWM nesting
+  # rooms set master: select.master
   - platform: multizone_thermostat
     name: master
     unique_id: mz_master
-    initial_hvac_mode: "off" # or heat or cool
-    initial_preset_mode: "none" # or one from 'custom_presets'
-
-    # be careful for the master stuck switch check
-    # depending the configuration and connction to heater/cooling device
+    entity_id: switch.mz_heater_master
+    switch_mode: NC
+    supported_modes:
+      - heat
+    initial_option: heat
+    restore_from_old_state: True
+    # be careful for the circuit stuck switch check:
+    # depending the configuration and connection to heater/cooling device
     # it could trigger the heating or cooling device to start
     passive_switch_check: False
+    operation_mode: balanced
+    compensate_valve_lag:
+      seconds: 30
+    # pwm_duration should be a multiple of each room's control_interval
+    pwm_duration:
+      minutes: 5
+    pwm_scale: 100
+    pwm_resolution: 50
+    pwm_threshold: 5
+    lower_load_scale: 0.15
+    min_opening_for_propvalve: 0.1
 
-    # show detail control output (use only for config
-    # or debug to avoid log size issues)
-    detailed_output: False
-
-    restore_from_old_state: True # restore changes made via service calls
-    restore_parameters: False # yaml config is overrulled by services modified settings
-    restore_integral: True # PID integral restored to continue with previous pid setpoint
-
-    heat:
-
-      # a main valve supplying heat or cooling
-      # or relay to start heater/cooling
-      entity_id: switch.mz_heater_master
-
-      # specify valve is by default closed
-      switch_mode: "NC"
-
-      # not advised for master
-      # passive_switch_duration:
-      #   days: 5
-
-      # user defined presets. each mode needs to be defined per satellite.
-      # temperatures may differ per thermostat.
-      # temperatures defined at master are ignored.
-      extra_presets:
-        test: 10
-        tes: 20
-
-      master_mode: # configuration required for master
-
-        # nesting routine.
-        # "continuous": tries to create a continuous master valve opening when sufficient heat is required
-        # "minimal_on": opens the master valve as short as possible
-        # "balanced": schedules satellites such that a continuous minumum heat requirement is achieved,
-        #    then increases pwm duration. When continuous master valve opening is possible
-        #    control_val = pwm_scale it then start to open satellites at teh same time whereby
-        #    heating power rises. Scheduling of satellites is such that in time heating power is balanced.
-        operation_mode: "balanced"
-
-        # delayed opening to assure that sattelites have opened first
-        compensate_valve_lag:
-          seconds: 30
-
-        # time interval where pwm control output is calculated
-        # advised to set for master equal to 'pwm_duration'
-        control_interval:
-          # minutes: 30
-          minutes: 5
-
-        # interval time for pwm. within this example the valve is openened
-        # each 30 minutes whne heat is required
-        # equal with 'control_interval'
-        pwm_duration:
-          # minutes: 30
-          minutes: 5
-
-        # scale wherein pwm operates. Normally 100, it will operate between 0-100 where
-        # 0 is valve closed and 100 valve open during whole pwm duration
-        pwm_scale: 100
-
-        # number of steps in pwm scale. a resolution of 50
-        # and pwm scale 100 results in stepsize 2
-        pwm_resolution: 50
-
-        # minimum pwm before opening
-        pwm_threshold: 5
-
-        # For nesting assumed minimum required load heater. Percentage of total rooms
-        # relative to total area that request heat should be more than 'lower_load_scale'
-        lower_load_scale: 0.15
-
-        # percentage of pwm_scale to open when a proportional valve requires heat.
-        # avoids for proportional valves short opening of master valve whereby no heat is
-        # arriving at require room
-        min_opening_for_propvalve: 0.1
-
+climate:
 
   # slow responding water under floor heating
   # PID start point settings
@@ -321,7 +260,7 @@ climate:
   - platform: multizone_thermostat
     name: pid1
     unique_id: mz_pid1
-    master: climate.master
+    master: select.master
     room_area: 60 # floor area of room
     initial_hvac_mode: "off"
     precision: 0.1 # stepsize for setpoint
@@ -408,7 +347,7 @@ climate:
   - platform: multizone_thermostat
     name: pid2
     unique_id: mz_pid2
-    master: climate.master
+    master: select.master
     room_area: 30
     initial_hvac_mode: "off"
     precision: 0.1
@@ -481,7 +420,7 @@ climate:
   - platform: multizone_thermostat
     name: pid3
     unique_id: mz_pid3
-    master: climate.master
+    master: select.master
     room_area: 15
     initial_hvac_mode: "off"
     precision: 0.1
@@ -554,7 +493,7 @@ climate:
   - platform: multizone_thermostat
     name: pid4
     unique_id: mz_pid4
-    master: climate.master
+    master: select.master
     room_area: 20
     initial_hvac_mode: "off"
     precision: 0.1
@@ -627,7 +566,7 @@ climate:
   - platform: multizone_thermostat
     name: pid5
     unique_id: mz_pid5
-    master: climate.master
+    master: select.master
     room_area: 30
     initial_hvac_mode: "off"
     precision: 0.1
@@ -700,7 +639,7 @@ climate:
   - platform: multizone_thermostat
     name: pid6
     unique_id: mz_pid6
-    master: climate.master
+    master: select.master
     room_area: 10
     initial_hvac_mode: "off"
     precision: 0.1

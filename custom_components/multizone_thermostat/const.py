@@ -57,7 +57,6 @@ CONF_SENSOR = "sensor"
 CONF_FILTER_MODE = "filter_mode"
 
 ATTR_HVAC_DEFINITION = "hvac_def"
-ATTR_SELF_CONTROLLED = "self_controlled"
 ATTR_SAT_ALLOWED = "satelite_allowed"
 ATTR_CONTROL_MODE = "control_mode"
 ATTR_CURRENT_TEMP_VEL = "current_temperature_velocity"
@@ -65,12 +64,12 @@ ATTR_CURRENT_OUTDOOR_TEMPERATURE = "current_outdoor_temp"
 ATTR_FILTER_MODE = "filter_mode"
 ATTR_DETAILED_OUTPUT = "detailed_output"
 ATTR_EMERGENCY_MODE = "emergency mode"
-ATTR_UPDATE_NEEDED = "update satelite"
 ATTR_LAST_SWITCH_CHANGE = "switch_last_change"
 ATTR_STUCK_LOOP = "stuck_loop"
 ATTR_ANTI_CALC_ACTIVE = "anti_calc_active"
-ATTR_ANTI_CALC_SATELLITE = "anti_calc_satellite"
-ATTR_ANTI_CALC_QUEUE = "anti_calc_queue"
+ATTR_SATELLITES = "satellites"
+ATTR_TOTAL_AREA = "total_area"
+ATTR_CIRCUIT = "circuit"
 
 PRESET_EMERGENCY = "emergency"
 PRESET_RESTORE = "restore"
@@ -153,6 +152,8 @@ CONF_MASTER = "master"
 CONF_MASTER_MODE = "master_mode"
 CONF_MASTER_OPERATION_MODE = "operation_mode"
 CONF_SATELITES = "satelites"
+CONF_INITIAL_OPTION = "initial_option"
+CONF_SUPPORTED_MODES = "supported_modes"
 CONF_MIN_VALVE = "min_opening_for_propvalve"
 CONF_CONTINUOUS_LOWER_LOAD = "lower_load_scale"
 
@@ -171,12 +172,8 @@ class NestingMode(StrEnum):
 
 
 # control constants
-CONTROL_START_DELAY = 1  #   # seconds, control loop start delay rel to time()
-MASTER_CONTROL_LEAD = 1  # 0.1  # seconds, time between last sat and master control
-SAT_CONTROL_LEAD = 0.5  # 0.15  # seconds, time between control loop sats
-PWM_LAG = 0.5  # 0.05  # seconds
+CONTROL_START_DELAY = 1  # seconds, first epoch after HVAC/circuit start
 PWM_UPDATE_CHANGE = 0.05  # percentage, pwm difference above which an update is needed
-CLOSE_TO_PWM = 0.1  # percentage, if time is close to next pwm loop
 MIN_MASTER_LOAD = 0.25  # min load for nesting
 NESTING_DOMINANCE = 0.75  # limit dominant room in nesting
 
@@ -189,10 +186,10 @@ NESTING_MATRIX = 20
 NESTING_BALANCE = 0.1
 
 
-class OperationMode(StrEnum):
-    """Operation modes for satelite thermostats."""
+class CircuitMode(StrEnum):
+    """Operating modes for the heating-circuit Select entity."""
 
-    PENDING = "pending"
-    MASTER = "master"
-    SELF = "self_controlled"
-    NO_CHANGE = "no change"
+    HEAT = "heat"
+    COOL = "cool"
+    STANDBY = "standby"
+    UNCOORDINATED = "uncoordinated"
