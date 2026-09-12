@@ -43,7 +43,7 @@ import voluptuous as vol
 import homeassistant.helpers.config_validation as cv
 
 from . import DOMAIN, PLATFORMS
-from .circuit import CircuitPlan
+from .circuit_plan import CircuitPlan, CircuitPlanBuilder, RoomDemand
 from .const import (
     ATTR_ANTI_CALC_ACTIVE,
     ATTR_CONTROL_OFFSET,
@@ -88,7 +88,6 @@ from .const import (
     CircuitMode,
     NestingMode,
 )
-from .pwm_nesting import Nesting
 from .validations import validate_stuck_time
 from .zone_registry import async_get_registry
 
@@ -247,16 +246,28 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         self._registry_id: str | None = None
         self._area = 0.0
         self._pwm_start_time: float | None = None
-        self._epoch_unsub = None
-        self._start_pwm = None
-        self._stop_pwm = None
+        self._epoch_timer = None
+        self._pwm_start_timer = None
+        self._pwm_stop_timer = None
         self._plant_output = {
             ATTR_CONTROL_OFFSET: 0.0,
             ATTR_CONTROL_PWM_OUTPUT: 0.0,
         }
         self._anti_calc_queue: list[str] = []
         self._anti_calc_current: str | None = None
-        self._anti_calc_unsub = None
+        self._anti_calc_timer = None
+        self._plan_builder = CircuitPlanBuilder.create(
+            name=self._attr_name or "circuit",
+            duration=self._pwm_duration,
+            operation_mode=self._operation_mode,
+            pwm_scale=self._pwm_scale,
+            pwm_threshold=self._pwm_threshold,
+            pwm_resolution=self._pwm_resolution,
+            min_load=self._min_load,
+            min_valve=self._min_valve,
+            valve_lag=self._valve_lag,
+            plant_entity_id=self._switch_entity,
+        )
 
     @property
     def pwm_duration_seconds(self) -> float:
@@ -342,8 +353,8 @@ class CircuitSelect(SelectEntity, RestoreEntity):
             self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_START, _async_startup)
 
     async def async_will_remove_from_hass(self) -> None:
-        self._cancel_epoch()
-        self._cancel_plant_pwm()
+        self._clear_epoch_timer()
+        self._clear_pwm_timers()
         self.finish_anti_calc()
         async_get_registry(self.hass).unregister_circuit(self)
         await super().async_will_remove_from_hass()
@@ -374,14 +385,14 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         self._refresh_area()
 
         if option == CircuitMode.STANDBY:
-            self._cancel_epoch()
-            self._cancel_plant_pwm()
+            self._clear_epoch_timer()
+            self._clear_pwm_timers()
             await self._async_plant_off()
             for sat in members:
                 await sat.cancel_scheduled_control(close_valve=True)
         elif option == CircuitMode.UNCOORDINATED:
-            self._cancel_epoch()
-            self._cancel_plant_pwm()
+            self._clear_epoch_timer()
+            self._clear_pwm_timers()
             await self._async_plant_off()
             self._plant_output = {
                 ATTR_CONTROL_OFFSET: 0.0,
@@ -403,27 +414,32 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         self._area = sum(sat.room_area for sat in members)
 
     def _start_epoch_loop(self) -> None:
-        self._cancel_epoch()
+        self._clear_epoch_timer()
         if not self.is_coordinated or self._pwm_duration <= 0:
             return
         self._pwm_start_time = time.time() + CONTROL_START_DELAY
-        self._schedule_epoch(self._pwm_start_time)
+        self._set_epoch_timer(self._pwm_start_time)
 
-    def _schedule_epoch(self, when: float) -> None:
-        self._cancel_epoch()
-        self._epoch_unsub = async_track_point_in_utc_time(
+    def _set_epoch_timer(self, when: float) -> None:
+        self._clear_epoch_timer()
+
+        async def _fired(now: datetime.datetime | None = None) -> None:
+            self._epoch_timer = None
+            await self._on_epoch_timer(now)
+
+        self._epoch_timer = async_track_point_in_utc_time(
             self.hass,
-            self._async_epoch,
+            _fired,
             datetime.datetime.fromtimestamp(when),
         )
 
-    def _cancel_epoch(self) -> None:
-        if self._epoch_unsub is not None:
-            self._epoch_unsub()
-            self._epoch_unsub = None
+    def _clear_epoch_timer(self) -> None:
+        if self._epoch_timer is None:
+            return
+        self._epoch_timer()
+        self._epoch_timer = None
 
-    async def _async_epoch(self, now: datetime.datetime | None = None) -> None:
-        self._epoch_unsub = None
+    async def _on_epoch_timer(self, now: datetime.datetime | None = None) -> None:
         if not self.is_coordinated:
             return
 
@@ -438,67 +454,67 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         self._refresh_area()
         members = async_get_registry(self.hass).members(self.entity_id)
         hvac_mode = self.circuit_hvac_mode
-        sat_data = {}
+        demands: list[RoomDemand] = []
         for sat in members:
             await sat.plan()
             data = sat.nesting_input(hvac_mode)
             if data:
-                sat_data[sat.entity_id] = data
+                demands.append(data)
 
-        nesting = Nesting(
-            self._attr_name,
-            operation_mode=self._operation_mode,
-            master_pwm=self._pwm_scale,
-            tot_area=max(self._area, 1.0),
-            min_load=self._min_load,
-            pwm_threshold=self._pwm_threshold,
-            min_prop_valve_opening=self._min_valve,
-            pwm_resolution=self._pwm_resolution,
-        )
-        nesting.nest_rooms(sat_data)
-        nesting.distribute_nesting()
-        offsets = nesting.get_nesting() or {}
-        master_offset, master_pwm = nesting.get_master_output()
-
-        plan = CircuitPlan(
+        plan = self._plan_builder.build(
             epoch=self._pwm_start_time,
             hvac_mode=hvac_mode,
-            offsets=offsets,
-            master_pwm=master_pwm,
-            master_offset=master_offset,
-            pwm_scale=self._pwm_scale,
-            pwm_duration=self._pwm_duration,
-            idle=False,
+            demands=demands,
+            tot_area=self._area,
         )
-        self._plant_output = {
-            ATTR_CONTROL_OFFSET: master_offset,
-            ATTR_CONTROL_PWM_OUTPUT: master_pwm,
-        }
+        self._plant_output = self._plant_output_from(plan)
         await self._schedule_plant(plan)
         for sat in members:
             await sat.schedule_valve(plan)
 
         self.async_write_ha_state()
-        self._schedule_epoch(self._pwm_start_time + self._pwm_duration)
+        self._set_epoch_timer(self._pwm_start_time + self._pwm_duration)
+
+    def _plant_output_from(self, plan: CircuitPlan) -> dict:
+        """Duty-cycle attributes in pwm_scale units, derived from plant times."""
+        plant = plan.plant
+        if (
+            plant.open_at is None
+            or plant.close_at is None
+            or plan.duration <= 0
+            or self._pwm_scale <= 0
+        ):
+            return {
+                ATTR_CONTROL_OFFSET: 0.0,
+                ATTR_CONTROL_PWM_OUTPUT: 0.0,
+            }
+        start = plant.open_at - self._valve_lag
+        offset = max(0.0, (start - plan.epoch) / plan.duration * self._pwm_scale)
+        pwm = (plant.close_at - plant.open_at) / plan.duration * self._pwm_scale
+        return {
+            ATTR_CONTROL_OFFSET: offset,
+            ATTR_CONTROL_PWM_OUTPUT: pwm,
+        }
 
     async def _schedule_plant(self, plan: CircuitPlan) -> None:
-        self._cancel_plant_pwm()
-        if plan.master_pwm <= 0 or self._pwm_duration <= 0:
+        self._clear_pwm_timers()
+        plant = plan.plant
+        start_time = plant.open_at
+        end_time = plant.close_at
+        if start_time is None or end_time is None or plan.duration <= 0:
             await self._async_plant_off()
             return
 
-        scale_factor = self._pwm_duration / self._pwm_scale
-        start_time = plan.epoch + plan.master_offset * scale_factor + self._valve_lag
-        end_time = start_time + plan.master_pwm * scale_factor
         now = time.time()
-
+        min_on = (
+            self._pwm_threshold / self._pwm_scale * plan.duration
+            if self._pwm_scale
+            else 0
+        )
         if end_time <= start_time or end_time < now:
             await self._async_plant_off()
             return
-        if end_time - now < max(
-            self._pwm_threshold / self._pwm_scale * self._pwm_duration,
-            START_MISALINGMENT,
-        ):
+        if end_time - now < max(min_on, START_MISALINGMENT):
             await self._async_plant_off()
             return
 
@@ -508,33 +524,58 @@ class CircuitSelect(SelectEntity, RestoreEntity):
             await self._async_plant_on()
 
         if start_time > now:
-            self._start_pwm = async_track_point_in_utc_time(
-                self.hass,
-                self._async_plant_on_at,
-                datetime.datetime.fromtimestamp(start_time),
-            )
-        if end_time > now and plan.master_pwm != self._pwm_scale:
-            self._stop_pwm = async_track_point_in_utc_time(
-                self.hass,
-                self._async_plant_off_at,
-                datetime.datetime.fromtimestamp(end_time),
-            )
+            self._set_pwm_start_timer(start_time)
+        full_window = end_time - start_time >= plan.duration - 1e-6
+        if end_time > now and not full_window:
+            self._set_pwm_stop_timer(end_time)
 
-    async def _async_plant_on_at(self, now: datetime.datetime) -> None:
-        self._start_pwm = None
+    def _set_pwm_start_timer(self, when: float) -> None:
+        self._clear_pwm_start_timer()
+
+        async def _fired(_now: datetime.datetime) -> None:
+            self._pwm_start_timer = None
+            await self._on_pwm_start_timer()
+
+        self._pwm_start_timer = async_track_point_in_utc_time(
+            self.hass,
+            _fired,
+            datetime.datetime.fromtimestamp(when),
+        )
+
+    def _clear_pwm_start_timer(self) -> None:
+        if self._pwm_start_timer is None:
+            return
+        self._pwm_start_timer()
+        self._pwm_start_timer = None
+
+    def _set_pwm_stop_timer(self, when: float) -> None:
+        self._clear_pwm_stop_timer()
+
+        async def _fired(_now: datetime.datetime) -> None:
+            self._pwm_stop_timer = None
+            await self._on_pwm_stop_timer()
+
+        self._pwm_stop_timer = async_track_point_in_utc_time(
+            self.hass,
+            _fired,
+            datetime.datetime.fromtimestamp(when),
+        )
+
+    def _clear_pwm_stop_timer(self) -> None:
+        if self._pwm_stop_timer is None:
+            return
+        self._pwm_stop_timer()
+        self._pwm_stop_timer = None
+
+    def _clear_pwm_timers(self) -> None:
+        self._clear_pwm_start_timer()
+        self._clear_pwm_stop_timer()
+
+    async def _on_pwm_start_timer(self, _now: datetime.datetime | None = None) -> None:
         await self._async_plant_on()
 
-    async def _async_plant_off_at(self, now: datetime.datetime) -> None:
-        self._stop_pwm = None
+    async def _on_pwm_stop_timer(self, _now: datetime.datetime | None = None) -> None:
         await self._async_plant_off()
-
-    def _cancel_plant_pwm(self) -> None:
-        if self._start_pwm is not None:
-            self._start_pwm()
-            self._start_pwm = None
-        if self._stop_pwm is not None:
-            self._stop_pwm()
-            self._stop_pwm = None
 
     def _is_plant_on(self) -> bool:
         state = self.hass.states.get(self._switch_entity)
@@ -630,9 +671,9 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         self._anti_calc_queue = queue
         self._anti_calc_current = None
         self.async_write_ha_state()
-        await self._async_anti_calc_next()
+        await self._on_anti_calc_timer()
 
-    async def _async_anti_calc_next(self) -> None:
+    async def _on_anti_calc_timer(self) -> None:
         if self.is_uncoordinated:
             self.finish_anti_calc()
             return
@@ -658,32 +699,33 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         )
         gap_s = self._passive_gap.total_seconds() if self._passive_gap else 0
         delay_s = opening_s + gap_s if self._anti_calc_queue else opening_s
-        self._schedule_anti_calc_next(delay_s)
+        self._set_anti_calc_timer(delay_s)
 
-    def _schedule_anti_calc_next(self, delay_s: float) -> None:
-        self._cancel_anti_calc_schedule()
+    def _set_anti_calc_timer(self, delay_s: float) -> None:
+        self._clear_anti_calc_timer()
         if delay_s <= 0:
-            self.hass.async_create_task(self._async_anti_calc_next())
+            self.hass.async_create_task(self._on_anti_calc_timer())
             return
 
-        async def _run(now: datetime.datetime) -> None:
-            self._anti_calc_unsub = None
-            await self._async_anti_calc_next()
+        async def _fired(_now: datetime.datetime) -> None:
+            self._anti_calc_timer = None
+            await self._on_anti_calc_timer()
 
-        self._anti_calc_unsub = async_track_point_in_utc_time(
+        self._anti_calc_timer = async_track_point_in_utc_time(
             self.hass,
-            _run,
+            _fired,
             datetime.datetime.fromtimestamp(time.time() + delay_s),
         )
 
-    def _cancel_anti_calc_schedule(self) -> None:
-        if self._anti_calc_unsub is not None:
-            self._anti_calc_unsub()
-            self._anti_calc_unsub = None
+    def _clear_anti_calc_timer(self) -> None:
+        if self._anti_calc_timer is None:
+            return
+        self._anti_calc_timer()
+        self._anti_calc_timer = None
 
     def finish_anti_calc(self) -> None:
         """Stop the in-memory flush sequence. Do not close satellite valves."""
-        self._cancel_anti_calc_schedule()
+        self._clear_anti_calc_timer()
         had_work = bool(self._anti_calc_current or self._anti_calc_queue)
         self._anti_calc_queue = []
         self._anti_calc_current = None
