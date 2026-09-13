@@ -111,12 +111,12 @@ detailed_output:
 
 stuck_prevention:
   name: Stuck prevention (anti-calc)
-  description: Rebuild the current window as an anti-calc flush plan when valves have been idle too long. On a climate entity this only runs while uncoordinated.
+  description: Check immediately whether valves need an anti-calc flush and run that plan if so. Does nothing when none qualify. On a climate entity this only runs while uncoordinated or standalone.
   fields:
     entity_id:
       description: Room climate to flush, or the circuit Select to start the coordinated sequence
       example: select.heizung_master
     force:
-      description: On the circuit, flush all idle rooms regardless of last switch change
+      description: Flush regardless of last valve change. On the circuit, include every satellite.
       example: true
 

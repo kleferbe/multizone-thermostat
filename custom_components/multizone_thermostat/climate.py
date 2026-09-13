@@ -842,7 +842,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         if self._hvac_on:
             self.control_output[ATTR_CONTROL_OFFSET] = 0
             self._hvac_on.time_offset = 0
-        plan = self._make_local_plan(self._pwm_start_time, force_stuck=False)
+        plan = self._make_local_plan(self._pwm_start_time)
         await self._commit_local_plan(plan)
 
     def _nominal_window(self) -> float:
@@ -854,23 +854,20 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             return self._hvac_on.get_operate_cycle_time.total_seconds()
         return 0.0
 
-    def _make_local_plan(self, epoch: float, force_stuck: bool = False) -> CircuitPlan:
+    def _make_local_plan(self, epoch: float) -> CircuitPlan:
         hvac_mode = self._hvac_mode if self._hvac_mode != HVACMode.OFF else None
         window = self._nominal_window()
         entity_id = self.entity_id
 
-        stale = self._local_stale(force_stuck)
         open_s = 0.0
         if self._hvac_on and self._hvac_on.get_switch_stale_open_time:
             open_s = self._hvac_on.get_switch_stale_open_time.total_seconds()
-        if stale and entity_id and open_s > 0 and (
-            force_stuck
-            or (
-                self._passive_switch
-                and check_time_in_window(
-                    epoch, window, self._passive_switch_time
-                )
-            )
+        if (
+            entity_id
+            and open_s > 0
+            and self._passive_switch
+            and self._local_stale()
+            and check_time_in_window(epoch, window, self._passive_switch_time)
         ):
             return CircuitPlanBuilder.stuck_local(
                 epoch, hvac_mode, entity_id, open_s
@@ -906,11 +903,11 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             operate_cycle=operate,
         )
 
-    def _local_stale(self, force: bool) -> bool:
+    def _local_stale(self) -> bool:
         if not self._hvac_on:
             return False
         duration = self._hvac_on.get_switch_stale
-        if not force and not duration:
+        if not duration:
             return False
         if self.preset_mode == PRESET_EMERGENCY:
             return False
@@ -918,10 +915,9 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             return False
         if self._is_valve_open():
             return False
-        if not force and duration:
-            last = self._hvac_on.switch_last_change
-            if last is not None and datetime.datetime.now(datetime.UTC) - last <= duration:
-                return False
+        last = self._hvac_on.switch_last_change
+        if last is not None and datetime.datetime.now(datetime.UTC) - last <= duration:
+            return False
         return True
 
     async def _commit_local_plan(self, plan: CircuitPlan) -> None:
@@ -1034,11 +1030,22 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         return None
 
     async def run_stuck_prevention(self, force: bool = False) -> None:
-        """Rebuild this room's window as a stuck-loop plan (uncoordinated)."""
-        if self.is_coordinated:
+        """Flush this room now if stale, or always when force. Coordinated rooms use the circuit."""
+        if self._circuit is not None and not self._circuit.is_uncoordinated:
             return
-        await self.plan()
-        await self._commit_local_plan(time.time(), force_stuck=force)
+        open_s = 0.0
+        if self._hvac_on and self._hvac_on.get_switch_stale_open_time:
+            open_s = self._hvac_on.get_switch_stale_open_time.total_seconds()
+        if open_s <= 0:
+            return
+        if not force and not self._local_stale():
+            return
+        hvac_mode = self._hvac_mode if self._hvac_mode != HVACMode.OFF else None
+        await self._commit_local_plan(
+            CircuitPlanBuilder.stuck_local(
+                time.time(), hvac_mode, self.entity_id, open_s
+            )
+        )
 
     @callback
     def _async_routine_controller(self, interval=None) -> None:

@@ -421,28 +421,21 @@ class CircuitSelect(SelectEntity, RestoreEntity):
             epoch = now_ts
         await self._commit_plan(await self._make_plan(epoch))
 
-    async def _make_plan(
-        self, epoch: float, force_stuck: bool = False
-    ) -> CircuitPlan:
+    async def _make_plan(self, epoch: float) -> CircuitPlan:
         self._refresh_area()
         hvac_mode = self.circuit_hvac_mode
-        stale = self._stale_room_ids(force_stuck)
+        stale = self._stale_room_ids()
         open_s = self._passive_open_time.total_seconds() if self._passive_open_time else 0.0
         if (
             stale
             and open_s > 0
-            and (
-                force_stuck
-                or (
-                    self._passive_switch
-                    and check_time_in_window(
-                        epoch, self._pwm_duration, self._passive_switch_time
-                    )
-                )
+            and self._passive_switch
+            and check_time_in_window(
+                epoch, self._pwm_duration, self._passive_switch_time
             )
         ):
             gap_s = self._passive_gap.total_seconds() if self._passive_gap else 0.0
-            self._logger.info("stuck-loop plan for %s (force=%s)", stale, force_stuck)
+            self._logger.info("stuck-loop plan for %s", stale)
             return self._plan_builder.build_stuck_loop(
                 epoch, hvac_mode, stale, open_s, gap_s
             )
@@ -463,9 +456,9 @@ class CircuitSelect(SelectEntity, RestoreEntity):
             tot_area=self._area,
         )
 
-    def _stale_room_ids(self, force: bool) -> list[str]:
+    def _stale_room_ids(self) -> list[str]:
         duration = self._passive_duration
-        if not force and not duration:
+        if not duration:
             return []
         hvac_mode = self.circuit_hvac_mode
         now = datetime.datetime.now(datetime.UTC)
@@ -477,10 +470,9 @@ class CircuitSelect(SelectEntity, RestoreEntity):
                 continue
             if sat.hvac_action in (HVACAction.HEATING, HVACAction.COOLING):
                 continue
-            if not force:
-                last = sat.switch_last_change()
-                if last is not None and now - last <= duration:
-                    continue
+            last = sat.switch_last_change()
+            if last is not None and now - last <= duration:
+                continue
             queue.append(sat.entity_id)
         return queue
 
@@ -602,8 +594,20 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         self.async_write_ha_state()
 
     async def async_run_stuck_prevention(self, force: bool = False) -> None:
-        """Rebuild the current window as a stuck-loop plan when rooms are stale."""
+        """Flush stale rooms now, or every satellite when force. No-op if none qualify."""
         if self.is_uncoordinated:
-            self._logger.debug("anti-calc skipped: circuit is uncoordinated")
             return
-        await self._commit_plan(await self._make_plan(time.time(), force_stuck=force))
+        open_s = self._passive_open_time.total_seconds() if self._passive_open_time else 0.0
+        if open_s <= 0:
+            return
+        members = async_get_registry(self.hass).members(self.entity_id)
+        room_ids = [sat.entity_id for sat in members] if force else self._stale_room_ids()
+        if not room_ids:
+            return
+        gap_s = self._passive_gap.total_seconds() if self._passive_gap else 0.0
+        self._logger.info("stuck-loop plan for %s (force=%s)", room_ids, force)
+        await self._commit_plan(
+            self._plan_builder.build_stuck_loop(
+                time.time(), self.circuit_hvac_mode, room_ids, open_s, gap_s
+            )
+        )
