@@ -71,6 +71,28 @@ class ValveSlot:
         not_done = self.close_at is None or self.close_at > now
         return started and not_done
 
+    async def apply_on_off_slot(
+        self: ValveSlot,
+        now: float,
+        turn_on,
+        turn_off,
+        set_open_timer,
+        set_close_timer,
+    ) -> None:
+        """Open/close from slot times. The plan is assumed valid."""
+        if self.is_closed:
+            await turn_off()
+            return
+        if self.is_open_at(now):
+            await turn_on()
+        else:
+            await turn_off()
+        if self.open_at is not None and self.open_at > now:
+            set_open_timer(self.open_at)
+        if self.close_at is not None and self.close_at > now:
+            set_close_timer(self.close_at)
+
+
 
 @dataclass
 class CircuitPlan:
@@ -98,7 +120,7 @@ class CircuitPlan:
                 return slot
         return None
 
-    def for_entity(self, entity_id: str) -> CircuitPlan:
+    def copy_for(self, entity_id: str) -> CircuitPlan:
         """Copy this window with only the named valve."""
         slot = self.slot_for(entity_id) or ValveSlot(entity_id=entity_id)
         if entity_id == self.plant.entity_id:
@@ -410,8 +432,7 @@ class CircuitPlanBuilder:
                 slot = ValveSlot(entity_id=entity_id)
         elif pwm_duration > 0:
             duration = pwm_duration
-            scale = pwm_scale or 100.0
-            on = min(max(pwm, 0.0), scale) / scale * duration
+            on = min(max(pwm, 0.0), pwm_scale) / pwm_scale * duration
             slot = CircuitPlanBuilder._timed_slot(
                 entity_id,
                 epoch,
@@ -449,9 +470,7 @@ class CircuitPlanBuilder:
         pwm_threshold: float,
     ) -> ValveSlot:
         """On/off slot from a duration, applying min-on and full-window None."""
-        min_on = 0.0
-        if window > 0 and pwm_scale:
-            min_on = pwm_threshold / pwm_scale * window
+        min_on = pwm_threshold / pwm_scale * window if window > 0 else 0.0
         if on <= 0 or on < min_on:
             return ValveSlot(entity_id=entity_id)
         if window > 0 and on >= window - 1e-6:

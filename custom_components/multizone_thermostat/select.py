@@ -87,7 +87,7 @@ from .const import (
     CircuitMode,
     NestingMode,
 )
-from .validations import validate_stuck_time
+from .validations import validate_passive_switch_gap, validate_stuck_time
 from .zone_registry import async_get_registry
 
 _LOGGER = logging.getLogger(DOMAIN)
@@ -167,6 +167,7 @@ PLATFORM_SCHEMA = vol.All(
         }
     ),
     validate_stuck_time(),
+    validate_passive_switch_gap(),
 )
 
 
@@ -203,41 +204,33 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         unique_id = config.get(CONF_UNIQUE_ID)
         self._attr_unique_id = unique_id
         self._switch_entity = config[CONF_ENTITY_ID]
-        self._switch_mode = config.get(CONF_SWITCH_MODE, NC_SWITCH_MODE)
-        climate_modes = list(config.get(CONF_SUPPORTED_MODES) or [CircuitMode.HEAT])
+        self._switch_mode = config[CONF_SWITCH_MODE]
+        climate_modes = list(config[CONF_SUPPORTED_MODES])
         self._attr_options = [str(mode) for mode in climate_modes] + [
             CircuitMode.STANDBY,
             CircuitMode.UNCOORDINATED,
         ]
-        self._initial_option = str(config.get(CONF_INITIAL_OPTION, CircuitMode.HEAT))
+        self._initial_option = str(config[CONF_INITIAL_OPTION])
         if self._initial_option not in self._attr_options:
             self._initial_option = self._attr_options[0]
         self._attr_current_option = self._initial_option
-        self._restore_old_state = config.get(CONF_ENABLE_OLD_STATE, DEFAULT_OLD_STATE)
+        self._restore_old_state = config[CONF_ENABLE_OLD_STATE]
 
         self._pwm_duration = config[CONF_PWM_DURATION].total_seconds()
         self._pwm_scale = float(config[CONF_PWM_SCALE])
         self._pwm_resolution = float(config[CONF_PWM_RESOLUTION])
-        self._pwm_threshold = float(config.get(CONF_PWM_THRESHOLD, DEFAULT_MIN_DIFF))
-        self._operation_mode = config.get(
-            CONF_MASTER_OPERATION_MODE, NestingMode.MASTER_BALANCED
-        )
-        self._min_load = float(config.get(CONF_CONTINUOUS_LOWER_LOAD, DEFAULT_MIN_LOAD))
-        self._min_valve = float(config.get(CONF_MIN_VALVE, DEFAULT_MIN_VALVE_PWM))
-        lag = config.get(CONF_INCLUDE_VALVE_LAG, DEFAULT_INCLUDE_VALVE_LAG)
+        self._pwm_threshold = float(config[CONF_PWM_THRESHOLD])
+        self._operation_mode = config[CONF_MASTER_OPERATION_MODE]
+        self._min_load = float(config[CONF_CONTINUOUS_LOWER_LOAD])
+        self._min_valve = float(config[CONF_MIN_VALVE])
+        lag = config[CONF_INCLUDE_VALVE_LAG]
         self._valve_lag = lag.total_seconds() if lag else 0.0
 
-        self._passive_switch = config.get(
-            CONF_PASSIVE_SWITCH_CHECK, DEFAULT_PASSIVE_SWITCH
-        )
-        self._passive_switch_time = config.get(CONF_PASSIVE_CHECK_TIME)
+        self._passive_switch = config[CONF_PASSIVE_SWITCH_CHECK]
+        self._passive_switch_time = config[CONF_PASSIVE_CHECK_TIME]
         self._passive_duration = config.get(CONF_PASSIVE_SWITCH_DURATION)
-        self._passive_open_time = config.get(
-            CONF_PASSIVE_SWITCH_OPEN_TIME, DEFAULT_PASSIVE_SWITCH_OPEN_TIME
-        )
-        self._passive_gap = config.get(
-            CONF_PASSIVE_SWITCH_GAP, DEFAULT_PASSIVE_SWITCH_GAP
-        )
+        self._passive_open_time = config[CONF_PASSIVE_SWITCH_OPEN_TIME]
+        self._passive_gap = config[CONF_PASSIVE_SWITCH_GAP]
 
         self._logger = logging.getLogger(DOMAIN).getChild(self._attr_name)
         self._registry_id: str | None = None
@@ -275,7 +268,7 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         return self._attr_current_option == CircuitMode.UNCOORDINATED
 
     @property
-    def plant_idle(self) -> bool:
+    def is_standby(self) -> bool:
         """True when the plant is out of climate service."""
         return self._attr_current_option == CircuitMode.STANDBY
 
@@ -379,7 +372,7 @@ class CircuitSelect(SelectEntity, RestoreEntity):
             if starting:
                 self._set_epoch_timer(time.time() + CONTROL_START_DELAY)
             else:
-                await self._commit_plan(await self._make_plan(time.time()))
+                await self._apply_window(await self._build_window(time.time()))
 
         self.async_write_ha_state()
         for sat in members:
@@ -419,9 +412,9 @@ class CircuitSelect(SelectEntity, RestoreEntity):
                 epoch += self._pwm_duration
         else:
             epoch = now_ts
-        await self._commit_plan(await self._make_plan(epoch))
+        await self._apply_window(await self._build_window(epoch))
 
-    async def _make_plan(self, epoch: float) -> CircuitPlan:
+    async def _build_window(self, epoch: float) -> CircuitPlan:
         self._refresh_area()
         hvac_mode = self.circuit_hvac_mode
         stale = self._stale_room_ids()
@@ -440,13 +433,13 @@ class CircuitSelect(SelectEntity, RestoreEntity):
                 epoch, hvac_mode, stale, open_s, gap_s
             )
 
-        if self.plant_idle:
+        if self.is_standby:
             return self._plan_builder.idle(epoch, hvac_mode)
 
         demands = []
         for sat in async_get_registry(self.hass).members(self.entity_id):
-            await sat.plan()
-            data = sat.nesting_input(hvac_mode)
+            await sat.update_demand()
+            data = sat.get_demand(hvac_mode)
             if data:
                 demands.append(data)
         return self._plan_builder.build(
@@ -476,29 +469,23 @@ class CircuitSelect(SelectEntity, RestoreEntity):
             queue.append(sat.entity_id)
         return queue
 
-    async def _commit_plan(self, plan: CircuitPlan) -> None:
+    async def _apply_window(self, plan: CircuitPlan) -> None:
         self._circuit_plan = plan
         await self._schedule_plant(plan)
         for sat in async_get_registry(self.hass).members(self.entity_id):
-            await sat.schedule_valve(plan.for_entity(sat.entity_id))
+            await sat.apply_plan(plan.copy_for(sat.entity_id))
         self._set_epoch_timer(plan.window_end)
         self.async_write_ha_state()
 
     async def _schedule_plant(self, plan: CircuitPlan) -> None:
         self._clear_pwm_timers()
-        slot = plan.plant
-        now = time.time()
-        if slot.is_closed:
-            await self._async_plant_off()
-            return
-        if slot.is_open_at(now):
-            await self._async_plant_on()
-        else:
-            await self._async_plant_off()
-        if slot.open_at is not None and slot.open_at > now:
-            self._set_pwm_start_timer(slot.open_at)
-        if slot.close_at is not None and slot.close_at > now:
-            self._set_pwm_stop_timer(slot.close_at)
+        await plan.plant.apply_on_off_slot(
+            time.time(),
+            self._async_plant_on,
+            self._async_plant_off,
+            self._set_pwm_start_timer,
+            self._set_pwm_stop_timer,
+        )
 
     def _set_pwm_start_timer(self, when: float) -> None:
         self._clear_pwm_start_timer()
@@ -606,7 +593,7 @@ class CircuitSelect(SelectEntity, RestoreEntity):
             return
         gap_s = self._passive_gap.total_seconds() if self._passive_gap else 0.0
         self._logger.info("stuck-loop plan for %s (force=%s)", room_ids, force)
-        await self._commit_plan(
+        await self._apply_window(
             self._plan_builder.build_stuck_loop(
                 time.time(), self.circuit_hvac_mode, room_ids, open_s, gap_s
             )

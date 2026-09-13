@@ -22,8 +22,6 @@ from .const import (
     CONF_SENSOR_OUT,
     CONF_WC_MODE,
     CONF_WINDOW_OPEN_TEMPDROP,
-    DEFAULT_PASSIVE_SWITCH_GAP,
-    DEFAULT_PASSIVE_SWITCH_OPEN_TIME,
 )
 
 
@@ -32,7 +30,7 @@ def validate_initial_control_mode(*keys: str) -> Callable:
 
     def validate(obj: dict[str, Any]) -> dict[str, Any]:
         """Check this condition."""
-        for hvac_mode in [HVACMode.COOL, HVACMode.HEAT]:
+        for hvac_mode in (HVACMode.HEAT, HVACMode.COOL):
             if hvac_mode in obj:
                 if all(
                     x in obj[hvac_mode]
@@ -53,7 +51,7 @@ def validate_window(*keys: str) -> Callable:
 
     def validate(obj: dict[str, Any]) -> dict[str, Any]:
         """Check this condition."""
-        for hvac_mode in [HVACMode.COOL, HVACMode.HEAT]:
+        for hvac_mode in (HVACMode.HEAT, HVACMode.COOL):
             if hvac_mode in obj and CONF_FILTER_MODE not in obj:
                 try:
                     if (
@@ -78,7 +76,7 @@ def validate_initial_sensors(*keys: str) -> Callable:
 
     def validate(obj: dict[str, Any]) -> dict[str, Any]:
         """Check this condition."""
-        for hvac_mode in [HVACMode.HEAT, HVACMode.COOL]:
+        for hvac_mode in (HVACMode.HEAT, HVACMode.COOL):
             if hvac_mode in obj:
                 if CONF_ON_OFF_MODE in obj[hvac_mode] and not CONF_SENSOR in obj:
                     raise vol.Invalid(
@@ -117,7 +115,7 @@ def validate_circuit_member(*keys: str) -> Callable:
         """Check this condition."""
         if CONF_MASTER not in obj:
             return obj
-        for hvac_mode in [HVACMode.HEAT, HVACMode.COOL]:
+        for hvac_mode in (HVACMode.HEAT, HVACMode.COOL):
             if hvac_mode in obj and CONF_ON_OFF_MODE in obj[hvac_mode]:
                 raise vol.Invalid(
                     "on-off control cannot be a circuit member (master: {})".format(
@@ -211,21 +209,27 @@ def validate_stuck_time(*keys: str) -> Callable:
 def validate_passive_switch_gap(*keys: str) -> Callable:
     """Reject a gap smaller than minus the anti-calc opening time."""
 
+    def _check(conf: dict[str, Any]) -> None:
+        if (
+            CONF_PASSIVE_SWITCH_GAP not in conf
+            or CONF_PASSIVE_SWITCH_OPEN_TIME not in conf
+        ):
+            return
+        gap = conf[CONF_PASSIVE_SWITCH_GAP]
+        opening = conf[CONF_PASSIVE_SWITCH_OPEN_TIME]
+        if gap < -opening:
+            raise vol.Invalid(
+                f"{CONF_PASSIVE_SWITCH_GAP} ({gap}) must not be less than "
+                f"-{CONF_PASSIVE_SWITCH_OPEN_TIME} ({opening})"
+            )
+
     def validate(obj: dict[str, Any]) -> dict[str, Any]:
         """Check this condition."""
+        _check(obj)
         for hvac_mode in (HVACMode.HEAT, HVACMode.COOL):
             conf = obj.get(hvac_mode)
-            if not conf:
-                continue
-            gap = conf.get(CONF_PASSIVE_SWITCH_GAP, DEFAULT_PASSIVE_SWITCH_GAP)
-            opening = conf.get(
-                CONF_PASSIVE_SWITCH_OPEN_TIME, DEFAULT_PASSIVE_SWITCH_OPEN_TIME
-            )
-            if gap < -opening:
-                raise vol.Invalid(
-                    f"{CONF_PASSIVE_SWITCH_GAP} ({gap}) must not be less than "
-                    f"-{CONF_PASSIVE_SWITCH_OPEN_TIME} ({opening})"
-                )
+            if conf:
+                _check(conf)
         return obj
 
     return validate

@@ -1,4 +1,6 @@
 """Constants used for multizone thermostat."""
+from datetime import timedelta
+
 import voluptuous as vol
 
 from homeassistant.components.climate import PLATFORM_SCHEMA, PRESET_NONE, HVACMode
@@ -108,11 +110,13 @@ controller_config = {
         cv.time_period, cv.positive_timedelta
     ),
     vol.Optional(CONF_PWM_DURATION, default=DEFAULT_PWM): vol.All(
-        cv.time_period, cv.positive_timedelta
+        cv.time_period, vol.Range(min=timedelta(0))
     ),
-    vol.Optional(CONF_PWM_SCALE, default=DEFAULT_PWM_SCALE): vol.Coerce(float),
-    vol.Optional(CONF_PWM_RESOLUTION, default=DEFAULT_PWM_RESOLUTION): vol.Coerce(
-        float
+    vol.Optional(CONF_PWM_SCALE, default=DEFAULT_PWM_SCALE): vol.All(
+        vol.Coerce(float), vol.Range(min=1e-6)
+    ),
+    vol.Optional(CONF_PWM_RESOLUTION, default=DEFAULT_PWM_RESOLUTION): vol.All(
+        vol.Coerce(float), vol.Range(min=1e-6)
     ),
     vol.Optional(CONF_PWM_THRESHOLD, default=DEFAULT_MIN_DIFF): vol.Coerce(float),
     vol.Optional(
@@ -173,8 +177,7 @@ temp_set_cool = {
     ),
 }
 
-on_off_heat = {vol.Optional(CONF_ON_OFF_MODE): vol.Schema({**on_off})}
-on_off_cool = {vol.Optional(CONF_ON_OFF_MODE): vol.Schema({**on_off})}
+on_off_mode = {vol.Optional(CONF_ON_OFF_MODE): vol.Schema({**on_off})}
 
 # proportional mode"
 prop = {
@@ -183,21 +186,22 @@ prop = {
     vol.Optional(CONF_WC_MODE): vol.Schema(WC_control_options),
 }
 
-prop_heat = {vol.Optional(CONF_PROPORTIONAL_MODE): vol.Schema({**prop})}
-prop_cool = {vol.Optional(CONF_PROPORTIONAL_MODE): vol.Schema({**prop})}
+prop_mode = {vol.Optional(CONF_PROPORTIONAL_MODE): vol.Schema({**prop})}
+
+actuator_schema = {
+    **hvac_control_options,
+    **on_off_mode,
+    **prop_mode,
+}
 
 hvac_control_heat = {
-    **hvac_control_options,
+    **actuator_schema,
     **temp_set_heat,
-    **on_off_heat,
-    **prop_heat,
 }
 
 hvac_control_cool = {
-    **hvac_control_options,
+    **actuator_schema,
     **temp_set_cool,
-    **on_off_cool,
-    **prop_cool,
 }
 
 PLATFORM_SCHEMA = vol.All(

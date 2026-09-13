@@ -45,9 +45,6 @@ DEFAULT_MASTER_SCALE_BOUND = 1
 MIN_PWM_DURATION = timedelta(seconds=60)
 DEFAULT_CIRCUIT_PWM = timedelta(minutes=15)
 
-# MASTER
-DEFAULT_OPERATION = "on_off"
-
 # configuration variables
 CONF_INITIAL_HVAC_MODE = "initial_hvac_mode"
 CONF_INITIAL_PRESET_MODE = "initial_preset_mode"
@@ -59,7 +56,6 @@ CONF_SENSOR = "sensor"
 CONF_FILTER_MODE = "filter_mode"
 
 ATTR_HVAC_DEFINITION = "hvac_def"
-ATTR_SAT_ALLOWED = "satelite_allowed"
 ATTR_CONTROL_MODE = "control_mode"
 ATTR_CURRENT_TEMP_VEL = "current_temperature_velocity"
 ATTR_CURRENT_OUTDOOR_TEMPERATURE = "current_outdoor_temp"
@@ -152,9 +148,7 @@ ATTR_KB = "kb"
 
 # Master mode
 CONF_MASTER = "master"
-CONF_MASTER_MODE = "master_mode"
 CONF_MASTER_OPERATION_MODE = "operation_mode"
-CONF_SATELITES = "satelites"
 CONF_INITIAL_OPTION = "initial_option"
 CONF_SUPPORTED_MODES = "supported_modes"
 CONF_MIN_VALVE = "min_opening_for_propvalve"
