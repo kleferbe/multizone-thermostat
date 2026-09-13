@@ -33,7 +33,6 @@ from homeassistant.helpers.event import (
     EventStateChangedData,
     async_track_point_in_utc_time,
     async_track_state_change_event,
-    async_track_time_change,
 )
 from homeassistant.helpers.reload import async_setup_reload_service
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -43,12 +42,12 @@ import voluptuous as vol
 import homeassistant.helpers.config_validation as cv
 
 from . import DOMAIN, PLATFORMS
-from .circuit_plan import CircuitPlan, CircuitPlanBuilder, RoomDemand
+from .circuit_plan import CircuitPlan, CircuitPlanBuilder, check_time_in_window
 from .const import (
     ATTR_ANTI_CALC_ACTIVE,
-    ATTR_CONTROL_OFFSET,
-    ATTR_CONTROL_PWM_OUTPUT,
+    ATTR_CIRCUIT_PLAN,
     ATTR_SATELLITES,
+    ATTR_STUCK_LOOP,
     ATTR_TOTAL_AREA,
     CONF_AREA,
     CONF_CONTINUOUS_LOWER_LOAD,
@@ -78,13 +77,13 @@ from .const import (
     DEFAULT_PASSIVE_SWITCH,
     DEFAULT_PASSIVE_SWITCH_GAP,
     DEFAULT_PASSIVE_SWITCH_OPEN_TIME,
-    DEFAULT_PWM,
+    DEFAULT_CIRCUIT_PWM,
     DEFAULT_PWM_RESOLUTION,
     DEFAULT_PWM_SCALE,
+    MIN_PWM_DURATION,
     NC_SWITCH_MODE,
     NO_SWITCH_MODE,
     PRESET_EMERGENCY,
-    START_MISALINGMENT,
     CircuitMode,
     NestingMode,
 )
@@ -131,13 +130,15 @@ PLATFORM_SCHEMA = vol.All(
             vol.Optional(
                 CONF_INCLUDE_VALVE_LAG, default=DEFAULT_INCLUDE_VALVE_LAG
             ): vol.All(cv.time_period, cv.positive_timedelta),
-            vol.Optional(CONF_PWM_DURATION, default=DEFAULT_PWM): vol.All(
-                cv.time_period, cv.positive_timedelta
+            vol.Optional(CONF_PWM_DURATION, default=DEFAULT_CIRCUIT_PWM): vol.All(
+                cv.time_period, vol.Range(min=MIN_PWM_DURATION)
             ),
-            vol.Optional(CONF_PWM_SCALE, default=DEFAULT_PWM_SCALE): vol.Coerce(float),
+            vol.Optional(CONF_PWM_SCALE, default=DEFAULT_PWM_SCALE): vol.All(
+                vol.Coerce(float), vol.Range(min=1e-6)
+            ),
             vol.Optional(
                 CONF_PWM_RESOLUTION, default=DEFAULT_PWM_RESOLUTION
-            ): vol.Coerce(float),
+            ): vol.All(vol.Coerce(float), vol.Range(min=1e-6)),
             vol.Optional(CONF_PWM_THRESHOLD, default=DEFAULT_MIN_DIFF): vol.Coerce(
                 float
             ),
@@ -214,13 +215,9 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         self._attr_current_option = self._initial_option
         self._restore_old_state = config.get(CONF_ENABLE_OLD_STATE, DEFAULT_OLD_STATE)
 
-        self._pwm_duration = config.get(
-            CONF_PWM_DURATION, datetime.timedelta(seconds=0)
-        ).total_seconds()
-        self._pwm_scale = float(config.get(CONF_PWM_SCALE, DEFAULT_PWM_SCALE))
-        self._pwm_resolution = float(
-            config.get(CONF_PWM_RESOLUTION, DEFAULT_PWM_RESOLUTION)
-        )
+        self._pwm_duration = config[CONF_PWM_DURATION].total_seconds()
+        self._pwm_scale = float(config[CONF_PWM_SCALE])
+        self._pwm_resolution = float(config[CONF_PWM_RESOLUTION])
         self._pwm_threshold = float(config.get(CONF_PWM_THRESHOLD, DEFAULT_MIN_DIFF))
         self._operation_mode = config.get(
             CONF_MASTER_OPERATION_MODE, NestingMode.MASTER_BALANCED
@@ -245,17 +242,10 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         self._logger = logging.getLogger(DOMAIN).getChild(self._attr_name)
         self._registry_id: str | None = None
         self._area = 0.0
-        self._pwm_start_time: float | None = None
         self._epoch_timer = None
         self._pwm_start_timer = None
         self._pwm_stop_timer = None
-        self._plant_output = {
-            ATTR_CONTROL_OFFSET: 0.0,
-            ATTR_CONTROL_PWM_OUTPUT: 0.0,
-        }
-        self._anti_calc_queue: list[str] = []
-        self._anti_calc_current: str | None = None
-        self._anti_calc_timer = None
+        self._circuit_plan: CircuitPlan | None = None
         self._plan_builder = CircuitPlanBuilder.create(
             name=self._attr_name or "circuit",
             duration=self._pwm_duration,
@@ -300,23 +290,25 @@ class CircuitSelect(SelectEntity, RestoreEntity):
 
     @property
     def anti_calc_active(self) -> bool:
-        """True while a sequential flush is running (in memory only)."""
-        return bool(self._anti_calc_current or self._anti_calc_queue)
+        """True while the current plan is a stuck-loop flush."""
+        return bool(self._circuit_plan and self._circuit_plan.stuck_loop)
 
     @property
     def extra_state_attributes(self) -> dict:
         registry = async_get_registry(self.hass)
-        return {
+        attrs = {
             ATTR_SATELLITES: registry.member_ids(self.entity_id),
             ATTR_TOTAL_AREA: self._area,
-            ATTR_CONTROL_OFFSET: self._plant_output[ATTR_CONTROL_OFFSET],
-            ATTR_CONTROL_PWM_OUTPUT: self._plant_output[ATTR_CONTROL_PWM_OUTPUT],
             CONF_PWM_DURATION: self._pwm_duration,
             CONF_PWM_SCALE: self._pwm_scale,
             CONF_MASTER_OPERATION_MODE: self._operation_mode,
             ATTR_ANTI_CALC_ACTIVE: self.anti_calc_active,
+            ATTR_STUCK_LOOP: self.anti_calc_active,
             CONF_AREA: self._area,
         }
+        if self._circuit_plan is not None:
+            attrs[ATTR_CIRCUIT_PLAN] = self._circuit_plan.as_dict()
+        return attrs
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -330,15 +322,6 @@ class CircuitSelect(SelectEntity, RestoreEntity):
                 self._async_switch_change,
             )
         )
-
-        if self._passive_switch and self._passive_switch_time:
-            async_track_time_change(
-                self.hass,
-                self._async_stuck_switch_check,
-                hour=self._passive_switch_time.hour,
-                minute=self._passive_switch_time.minute,
-                second=self._passive_switch_time.second,
-            )
 
         async def _async_startup(*_) -> None:
             if self._restore_old_state:
@@ -355,7 +338,6 @@ class CircuitSelect(SelectEntity, RestoreEntity):
     async def async_will_remove_from_hass(self) -> None:
         self._clear_epoch_timer()
         self._clear_pwm_timers()
-        self.finish_anti_calc()
         async_get_registry(self.hass).unregister_circuit(self)
         await super().async_will_remove_from_hass()
 
@@ -384,26 +366,20 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         members = async_get_registry(self.hass).members(self.entity_id)
         self._refresh_area()
 
-        if option == CircuitMode.STANDBY:
+        if option == CircuitMode.UNCOORDINATED:
             self._clear_epoch_timer()
             self._clear_pwm_timers()
             await self._async_plant_off()
-            for sat in members:
-                await sat.cancel_scheduled_control(close_valve=True)
-        elif option == CircuitMode.UNCOORDINATED:
-            self._clear_epoch_timer()
-            self._clear_pwm_timers()
-            await self._async_plant_off()
-            self._plant_output = {
-                ATTR_CONTROL_OFFSET: 0.0,
-                ATTR_CONTROL_PWM_OUTPUT: 0.0,
-            }
+            self._circuit_plan = None
             for sat in members:
                 sat.start_room_control()
         else:
             for sat in members:
                 sat.stop_local_epoch()
-            self._start_epoch_loop()
+            if starting:
+                self._set_epoch_timer(time.time() + CONTROL_START_DELAY)
+            else:
+                await self._commit_plan(await self._make_plan(time.time()))
 
         self.async_write_ha_state()
         for sat in members:
@@ -412,13 +388,6 @@ class CircuitSelect(SelectEntity, RestoreEntity):
     def _refresh_area(self) -> None:
         members = async_get_registry(self.hass).members(self.entity_id)
         self._area = sum(sat.room_area for sat in members)
-
-    def _start_epoch_loop(self) -> None:
-        self._clear_epoch_timer()
-        if not self.is_coordinated or self._pwm_duration <= 0:
-            return
-        self._pwm_start_time = time.time() + CONTROL_START_DELAY
-        self._set_epoch_timer(self._pwm_start_time)
 
     def _set_epoch_timer(self, when: float) -> None:
         self._clear_epoch_timer()
@@ -440,94 +409,104 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         self._epoch_timer = None
 
     async def _on_epoch_timer(self, now: datetime.datetime | None = None) -> None:
-        if not self.is_coordinated:
+        if self.is_uncoordinated:
             return
 
         now_ts = time.time()
-        if self._pwm_start_time is None:
-            self._pwm_start_time = now_ts
+        if self._circuit_plan is not None:
+            epoch = self._circuit_plan.window_end
+            while epoch + self._pwm_duration <= now_ts:
+                epoch += self._pwm_duration
         else:
-            # Timer fires at window start. Snap onto the due window, then run it now.
-            while self._pwm_start_time + self._pwm_duration <= now_ts:
-                self._pwm_start_time += self._pwm_duration
+            epoch = now_ts
+        await self._commit_plan(await self._make_plan(epoch))
 
+    async def _make_plan(
+        self, epoch: float, force_stuck: bool = False
+    ) -> CircuitPlan:
         self._refresh_area()
-        members = async_get_registry(self.hass).members(self.entity_id)
         hvac_mode = self.circuit_hvac_mode
-        demands: list[RoomDemand] = []
-        for sat in members:
+        stale = self._stale_room_ids(force_stuck)
+        open_s = self._passive_open_time.total_seconds() if self._passive_open_time else 0.0
+        if (
+            stale
+            and open_s > 0
+            and (
+                force_stuck
+                or (
+                    self._passive_switch
+                    and check_time_in_window(
+                        epoch, self._pwm_duration, self._passive_switch_time
+                    )
+                )
+            )
+        ):
+            gap_s = self._passive_gap.total_seconds() if self._passive_gap else 0.0
+            self._logger.info("stuck-loop plan for %s (force=%s)", stale, force_stuck)
+            return self._plan_builder.build_stuck_loop(
+                epoch, hvac_mode, stale, open_s, gap_s
+            )
+
+        if self.plant_idle:
+            return self._plan_builder.idle(epoch, hvac_mode)
+
+        demands = []
+        for sat in async_get_registry(self.hass).members(self.entity_id):
             await sat.plan()
             data = sat.nesting_input(hvac_mode)
             if data:
                 demands.append(data)
-
-        plan = self._plan_builder.build(
-            epoch=self._pwm_start_time,
+        return self._plan_builder.build(
+            epoch=epoch,
             hvac_mode=hvac_mode,
             demands=demands,
             tot_area=self._area,
         )
-        self._plant_output = self._plant_output_from(plan)
+
+    def _stale_room_ids(self, force: bool) -> list[str]:
+        duration = self._passive_duration
+        if not force and not duration:
+            return []
+        hvac_mode = self.circuit_hvac_mode
+        now = datetime.datetime.now(datetime.UTC)
+        queue: list[str] = []
+        for sat in async_get_registry(self.hass).members(self.entity_id):
+            if hvac_mode and sat.hvac_mode != hvac_mode:
+                continue
+            if sat.preset_mode == PRESET_EMERGENCY:
+                continue
+            if sat.hvac_action in (HVACAction.HEATING, HVACAction.COOLING):
+                continue
+            if not force:
+                last = sat.switch_last_change()
+                if last is not None and now - last <= duration:
+                    continue
+            queue.append(sat.entity_id)
+        return queue
+
+    async def _commit_plan(self, plan: CircuitPlan) -> None:
+        self._circuit_plan = plan
         await self._schedule_plant(plan)
-        for sat in members:
-            await sat.schedule_valve(plan)
-
+        for sat in async_get_registry(self.hass).members(self.entity_id):
+            await sat.schedule_valve(plan.for_entity(sat.entity_id))
+        self._set_epoch_timer(plan.window_end)
         self.async_write_ha_state()
-        self._set_epoch_timer(self._pwm_start_time + self._pwm_duration)
-
-    def _plant_output_from(self, plan: CircuitPlan) -> dict:
-        """Duty-cycle attributes in pwm_scale units, derived from plant times."""
-        plant = plan.plant
-        if (
-            plant.open_at is None
-            or plant.close_at is None
-            or plan.duration <= 0
-            or self._pwm_scale <= 0
-        ):
-            return {
-                ATTR_CONTROL_OFFSET: 0.0,
-                ATTR_CONTROL_PWM_OUTPUT: 0.0,
-            }
-        start = plant.open_at - self._valve_lag
-        offset = max(0.0, (start - plan.epoch) / plan.duration * self._pwm_scale)
-        pwm = (plant.close_at - plant.open_at) / plan.duration * self._pwm_scale
-        return {
-            ATTR_CONTROL_OFFSET: offset,
-            ATTR_CONTROL_PWM_OUTPUT: pwm,
-        }
 
     async def _schedule_plant(self, plan: CircuitPlan) -> None:
         self._clear_pwm_timers()
-        plant = plan.plant
-        start_time = plant.open_at
-        end_time = plant.close_at
-        if start_time is None or end_time is None or plan.duration <= 0:
-            await self._async_plant_off()
-            return
-
+        slot = plan.plant
         now = time.time()
-        min_on = (
-            self._pwm_threshold / self._pwm_scale * plan.duration
-            if self._pwm_scale
-            else 0
-        )
-        if end_time <= start_time or end_time < now:
+        if slot.is_closed:
             await self._async_plant_off()
             return
-        if end_time - now < max(min_on, START_MISALINGMENT):
-            await self._async_plant_off()
-            return
-
-        if start_time - now > START_MISALINGMENT and self._is_plant_on():
-            await self._async_plant_off()
-        elif start_time <= now < end_time:
+        if slot.is_open_at(now):
             await self._async_plant_on()
-
-        if start_time > now:
-            self._set_pwm_start_timer(start_time)
-        full_window = end_time - start_time >= plan.duration - 1e-6
-        if end_time > now and not full_window:
-            self._set_pwm_stop_timer(end_time)
+        else:
+            await self._async_plant_off()
+        if slot.open_at is not None and slot.open_at > now:
+            self._set_pwm_start_timer(slot.open_at)
+        if slot.close_at is not None and slot.close_at > now:
+            self._set_pwm_stop_timer(slot.close_at)
 
     def _set_pwm_start_timer(self, when: float) -> None:
         self._clear_pwm_start_timer()
@@ -622,113 +601,9 @@ class CircuitSelect(SelectEntity, RestoreEntity):
             )
         self.async_write_ha_state()
 
-    @callback
-    def _async_stuck_switch_check(self, now) -> None:
-        self.hass.async_create_task(self.async_run_stuck_prevention())
-
     async def async_run_stuck_prevention(self, force: bool = False) -> None:
-        """Build a satellite flush queue and run it sequentially."""
-        if self._anti_calc_current or self._anti_calc_queue:
-            self._logger.debug("anti-calc skipped: sequence already running")
-            return
-        if self.plant_idle:
-            # Standby still flushes; uncoordinated rooms do it themselves.
-            pass
+        """Rebuild the current window as a stuck-loop plan when rooms are stale."""
         if self.is_uncoordinated:
             self._logger.debug("anti-calc skipped: circuit is uncoordinated")
             return
-
-        duration = self._passive_duration
-        if not force and not duration:
-            self._logger.warning(
-                "anti-calc skipped: set passive_switch_duration on the circuit"
-            )
-            return
-
-        hvac_mode = self.circuit_hvac_mode
-        now = datetime.datetime.now(datetime.UTC)
-        queue: list[str] = []
-        for sat in async_get_registry(self.hass).members(self.entity_id):
-            if hvac_mode and sat.hvac_mode != hvac_mode:
-                continue
-            if sat.preset_mode in (PRESET_EMERGENCY,):
-                continue
-            if sat.anti_calc_active:
-                continue
-            if sat.hvac_action in (HVACAction.HEATING, HVACAction.COOLING):
-                continue
-            if not force and duration:
-                last = sat.switch_last_change()
-                if last is not None and now - last <= duration:
-                    continue
-            queue.append(sat.entity_id)
-
-        if not queue:
-            self._logger.debug("anti-calc: no satellites need a flush")
-            return
-
-        self._logger.info("anti-calc sequence start: %s (force=%s)", queue, force)
-        self._anti_calc_queue = queue
-        self._anti_calc_current = None
-        self.async_write_ha_state()
-        await self._on_anti_calc_timer()
-
-    async def _on_anti_calc_timer(self) -> None:
-        if self.is_uncoordinated:
-            self.finish_anti_calc()
-            return
-        if not self._anti_calc_queue:
-            self._anti_calc_current = None
-            self._logger.info("anti-calc sequence complete")
-            self.async_write_ha_state()
-            return
-
-        sat_id = self._anti_calc_queue.pop(0)
-        self._anti_calc_current = sat_id
-        self.async_write_ha_state()
-        self._logger.info(
-            "anti-calc flushing '%s', remaining %s", sat_id, self._anti_calc_queue
-        )
-
-        sat = async_get_registry(self.hass).climate(sat_id)
-        if sat is not None:
-            await sat.run_stuck_prevention()
-
-        opening_s = (
-            self._passive_open_time.total_seconds() if self._passive_open_time else 0
-        )
-        gap_s = self._passive_gap.total_seconds() if self._passive_gap else 0
-        delay_s = opening_s + gap_s if self._anti_calc_queue else opening_s
-        self._set_anti_calc_timer(delay_s)
-
-    def _set_anti_calc_timer(self, delay_s: float) -> None:
-        self._clear_anti_calc_timer()
-        if delay_s <= 0:
-            self.hass.async_create_task(self._on_anti_calc_timer())
-            return
-
-        async def _fired(_now: datetime.datetime) -> None:
-            self._anti_calc_timer = None
-            await self._on_anti_calc_timer()
-
-        self._anti_calc_timer = async_track_point_in_utc_time(
-            self.hass,
-            _fired,
-            datetime.datetime.fromtimestamp(time.time() + delay_s),
-        )
-
-    def _clear_anti_calc_timer(self) -> None:
-        if self._anti_calc_timer is None:
-            return
-        self._anti_calc_timer()
-        self._anti_calc_timer = None
-
-    def finish_anti_calc(self) -> None:
-        """Stop the in-memory flush sequence. Do not close satellite valves."""
-        self._clear_anti_calc_timer()
-        had_work = bool(self._anti_calc_current or self._anti_calc_queue)
-        self._anti_calc_queue = []
-        self._anti_calc_current = None
-        if had_work:
-            self._logger.info("anti-calc sequence finished")
-            self.async_write_ha_state()
+        await self._commit_plan(await self._make_plan(time.time(), force_stuck=force))

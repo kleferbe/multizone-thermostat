@@ -111,7 +111,7 @@ detailed_output:
 
 stuck_prevention:
   name: Stuck prevention (anti-calc)
-  description: Open the valve briefly to prevent sticking. On the heating-circuit Select this starts a sequential satellite flush. PWM will not close a satellite valve while stuck_loop is active.
+  description: Rebuild the current window as an anti-calc flush plan when valves have been idle too long. On a climate entity this only runs while uncoordinated.
   fields:
     entity_id:
       description: Room climate to flush, or the circuit Select to start the coordinated sequence

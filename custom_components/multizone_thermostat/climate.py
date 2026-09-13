@@ -60,7 +60,6 @@ from homeassistant.helpers.event import (
     EventStateChangedData,
     async_track_point_in_utc_time,
     async_track_state_change_event,
-    async_track_time_change,
     async_track_time_interval,
 )
 from homeassistant.helpers.reload import async_setup_reload_service
@@ -71,6 +70,7 @@ from . import DOMAIN, PLATFORMS, UKF_config, hvac_setting, services
 from .const import (
     ATTR_ANTI_CALC_ACTIVE,
     ATTR_CIRCUIT,
+    ATTR_CIRCUIT_PLAN,
     ATTR_CONTROL_OFFSET,
     ATTR_CONTROL_PWM_OUTPUT,
     ATTR_CURRENT_OUTDOOR_TEMPERATURE,
@@ -78,6 +78,7 @@ from .const import (
     ATTR_EMERGENCY_MODE,
     ATTR_FILTER_MODE,
     ATTR_HVAC_DEFINITION,
+    ATTR_STUCK_LOOP,
     ATTR_VALUE,
     CONF_AREA,
     CONF_DETAILED_OUTPUT,
@@ -102,10 +103,15 @@ from .const import (
     PRESET_RESTORE,
     PRESET_STANDBY,
     SERVICE_SET_VALUE,
-    START_MISALINGMENT,
 )
 from .platform_schema import PLATFORM_SCHEMA  # noqa: F401
-from .circuit_plan import CircuitPlan, RoomDemand
+from .circuit_plan import (
+    CircuitPlan,
+    CircuitPlanBuilder,
+    RoomDemand,
+    ValveSlot,
+    check_time_in_window,
+)
 from .zone_registry import async_get_registry
 
 if TYPE_CHECKING:
@@ -401,16 +407,6 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             )
         )
 
-        if self._passive_switch:
-            # run at night
-            async_track_time_change(
-                self.hass,
-                self._async_stuck_switch_check,
-                hour=self._passive_switch_time.hour,
-                minute=self._passive_switch_time.minute,
-                second=self._passive_switch_time.second,
-            )
-
         async def _async_startup(*_) -> None:
             """Init on startup."""
             self._logger.debug("Run start-up")
@@ -561,18 +557,21 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             ATTR_HVAC_DEFINITION: tmp_dict,
             ATTR_EMERGENCY_MODE: self._emergency_stop,
             ATTR_ANTI_CALC_ACTIVE: self.anti_calc_active,
+            ATTR_STUCK_LOOP: self.anti_calc_active,
             ATTR_CIRCUIT: self._circuit.entity_id if self._circuit else None,
             ATTR_CURRENT_TEMP_VEL: self.current_temperature_velocity,
             ATTR_CURRENT_OUTDOOR_TEMPERATURE: self.outdoor_temperature,
             ATTR_FILTER_MODE: self.filter_mode,
             CONF_AREA: self._area,
         }
+        if self._circuit_plan is not None:
+            attrs[ATTR_CIRCUIT_PLAN] = self._circuit_plan.as_dict()
         return attrs
 
     @property
     def anti_calc_active(self) -> bool:
-        """Return if an anti-calc flush is running on this entity."""
-        return any(data.stuck_loop for data in self._hvac_def.values())
+        """Return if the current plan is a stuck-loop flush."""
+        return bool(self._circuit_plan and self._circuit_plan.stuck_loop)
 
     def set_detailed_output(self, hvac_mode: HVACMode, new_mode: bool) -> None:
         """Configure attribute output level."""
@@ -721,15 +720,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         self._hvac_on.target_temperature = round(temperature, 3)
 
         if self._hvac_mode != HVACMode.OFF:
-            if self._hvac_on and self._hvac_on.is_hvac_on_off_mode:
-                await self._on_controller_timer(force=True)
-            else:
-                await self.plan()
-                if self._owns_epoch_loop() and (
-                    not self._hvac_on.get_pwm_time
-                    or self._hvac_on.get_pwm_time.total_seconds() == 0
-                ):
-                    await self._apply_local_valve()
+            await self.plan()
 
         self.async_write_ha_state()
 
@@ -747,7 +738,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             self._logger.info("HVAC mode changed to '%s'", hvac_mode)
 
             if self._hvac_on:
-                self._async_cancel_pwm_routines(self._hvac_mode, end_stuck_loop=True)
+                self._async_cancel_pwm_routines(self._hvac_mode)
                 self._async_routine_controller()
                 self.stop_local_epoch()
                 self.control_output = {
@@ -763,6 +754,8 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 self._logger.info(
                     "HVAC mode is OFF. Turn the devices OFF and exit hvac change"
                 )
+                if not self.is_coordinated:
+                    await self._commit_local_plan(time.time())
                 self.async_write_ha_state()
                 return
 
@@ -784,8 +777,12 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 self._hvac_on.outdoor_temperature = self.outdoor_temperature
 
             if self._hvac_on.is_hvac_on_off_mode:
-                if self._hvac_on.get_operate_cycle_time:
+                if (
+                    not self.is_coordinated
+                    and self._hvac_on.get_operate_cycle_time
+                ):
                     self._async_routine_controller(self._hvac_on.get_operate_cycle_time)
+                    await self._commit_local_plan(time.time())
             elif self._hvac_on.is_hvac_proportional_mode:
                 if self._owns_epoch_loop():
                     self.start_room_control()
@@ -803,15 +800,6 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         """Cancel local epoch and in-window PID ticks. Valve timers stay."""
         self._clear_local_epoch_timer()
         self._clear_pid_tick_timers()
-
-    async def cancel_scheduled_control(self, close_valve: bool = True) -> None:
-        """Circuit standby: drop valve and PID timers immediately."""
-        self.stop_local_epoch()
-        if close_valve:
-            if self._hvac_on:
-                self._hvac_on.reset_control_output()
-                self.control_output = self._hvac_on.get_control_output
-            self._async_cancel_pwm_routines()
 
     def _set_local_epoch_timer(self, when: float) -> None:
         self._clear_local_epoch_timer()
@@ -838,33 +826,109 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         self._pid_tick_timers = []
 
     async def _on_local_epoch_timer(self, now: datetime.datetime | None = None) -> None:
-        """One standalone PWM window: plan, valve, PID ticks."""
-        if not self._owns_epoch_loop() or not self._hvac_on:
+        """One standalone PWM window: demand, then a local plan."""
+        if not self._owns_epoch_loop():
             return
 
         now_ts = time.time()
-        pwm = self._hvac_on.get_pwm_time.total_seconds()
-        if pwm <= 0:
-            await self.plan()
-            await self._apply_local_valve()
-            interval = self._hvac_on.get_operate_cycle_time.total_seconds()
-            if interval > 0:
-                self._set_local_epoch_timer(now_ts + interval)
-            self.async_write_ha_state()
-            return
-
+        window = self._nominal_window()
         if self._pwm_start_time is None:
             self._pwm_start_time = now_ts
-        else:
-            while self._pwm_start_time + pwm <= now_ts:
-                self._pwm_start_time += pwm
+        elif window > 0:
+            while self._pwm_start_time + window <= now_ts:
+                self._pwm_start_time += window
 
         await self.plan()
-        self.control_output[ATTR_CONTROL_OFFSET] = 0
-        self._hvac_on.time_offset = 0
-        await self._apply_local_valve()
-        self._set_pid_tick_timers(self._pwm_start_time, pwm)
-        self._set_local_epoch_timer(self._pwm_start_time + pwm)
+        if self._hvac_on:
+            self.control_output[ATTR_CONTROL_OFFSET] = 0
+            self._hvac_on.time_offset = 0
+        plan = self._make_local_plan(self._pwm_start_time, force_stuck=False)
+        await self._commit_local_plan(plan)
+
+    def _nominal_window(self) -> float:
+        if self._hvac_on and self._hvac_on.get_pwm_time:
+            pwm = self._hvac_on.get_pwm_time.total_seconds()
+            if pwm > 0:
+                return pwm
+        if self._hvac_on and self._hvac_on.get_operate_cycle_time:
+            return self._hvac_on.get_operate_cycle_time.total_seconds()
+        return 0.0
+
+    def _make_local_plan(self, epoch: float, force_stuck: bool = False) -> CircuitPlan:
+        hvac_mode = self._hvac_mode if self._hvac_mode != HVACMode.OFF else None
+        window = self._nominal_window()
+        entity_id = self.entity_id
+
+        stale = self._local_stale(force_stuck)
+        open_s = 0.0
+        if self._hvac_on and self._hvac_on.get_switch_stale_open_time:
+            open_s = self._hvac_on.get_switch_stale_open_time.total_seconds()
+        if stale and entity_id and open_s > 0 and (
+            force_stuck
+            or (
+                self._passive_switch
+                and check_time_in_window(
+                    epoch, window, self._passive_switch_time
+                )
+            )
+        ):
+            return CircuitPlanBuilder.stuck_local(
+                epoch, hvac_mode, entity_id, open_s
+            )
+
+        if (
+            self._hvac_mode == HVACMode.OFF
+            or self.preset_mode == PRESET_EMERGENCY
+            or self.control_is_idle()
+        ):
+            return CircuitPlan.idle_plan(epoch, window, hvac_mode, entity_id)
+
+        pwm = (self.control_output.get(ATTR_CONTROL_PWM_OUTPUT, 0) or 0) if self.control_output else 0
+        pwm_scale = self._hvac_on.pwm_scale if self._hvac_on else 100
+        pwm_duration = (
+            self._hvac_on.get_pwm_time.total_seconds() if self._hvac_on else 0
+        )
+        threshold = self._hvac_on.pwm_threshold if self._hvac_on else 0
+        operate = (
+            self._hvac_on.get_operate_cycle_time.total_seconds()
+            if self._hvac_on and self._hvac_on.get_operate_cycle_time
+            else 0.0
+        )
+        return CircuitPlanBuilder.build_local(
+            epoch,
+            hvac_mode,
+            entity_id,
+            pwm,
+            pwm_scale,
+            pwm_duration,
+            threshold,
+            on_off=bool(self._hvac_on and self._hvac_on.is_hvac_on_off_mode),
+            operate_cycle=operate,
+        )
+
+    def _local_stale(self, force: bool) -> bool:
+        if not self._hvac_on:
+            return False
+        duration = self._hvac_on.get_switch_stale
+        if not force and not duration:
+            return False
+        if self.preset_mode == PRESET_EMERGENCY:
+            return False
+        if self.hvac_action in (HVACAction.HEATING, HVACAction.COOLING):
+            return False
+        if self._is_valve_open():
+            return False
+        if not force and duration:
+            last = self._hvac_on.switch_last_change
+            if last is not None and datetime.datetime.now(datetime.UTC) - last <= duration:
+                return False
+        return True
+
+    async def _commit_local_plan(self, plan: CircuitPlan) -> None:
+        await self.schedule_valve(plan)
+        self._pwm_start_time = plan.window_end
+        if self._owns_epoch_loop() and plan.duration > 0:
+            self._set_local_epoch_timer(plan.window_end)
         self.async_write_ha_state()
 
     def _set_pid_tick_timers(self, epoch: float, pwm_duration: float) -> None:
@@ -923,118 +987,45 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         )
 
     async def schedule_valve(self, plan: CircuitPlan) -> None:
-        """Apply this room's slot from the circuit plan."""
+        """Apply a one-valve plan: clear timers, store it, run the slot."""
+        self._clear_local_epoch_timer()
         self._clear_pid_tick_timers()
         self._circuit_plan = plan
-        if not self._hvac_on or self._hvac_mode == HVACMode.OFF:
-            return
         slot = plan.slot_for(self.entity_id)
-        if (
-            plan.idle
-            or slot is None
-            or slot.is_closed
-            or self.control_is_idle()
-            or plan.hvac_mode != self._hvac_mode
-        ):
-            self._hvac_on.reset_control_output()
-            self.control_output = self._hvac_on.get_control_output
-            self._async_cancel_pwm_routines()
-            return
+        if slot is None and plan.rooms:
+            slot = plan.rooms[0]
+        if slot is None:
+            slot = plan.plant if plan.plant.entity_id else ValveSlot(entity_id=self.entity_id)
+
         self._pwm_start_time = plan.epoch
-        if self._hvac_on.stuck_loop:
-            self._logger.debug("PWM skipped: stuck_loop active")
-        elif slot.position is not None:
+        if slot.position is not None:
             self._clear_pwm_timers()
             if slot.position <= 0:
-                self._async_cancel_pwm_routines()
+                await self._async_switch_turn_off()
             else:
                 await self._async_switch_turn_on(control_val=slot.position)
         else:
-            await self._schedule_valve_window(
-                slot.open_at, slot.close_at, plan.epoch, plan.duration
-            )
-        self._set_pid_tick_timers(plan.epoch, plan.duration)
+            await self._schedule_valve_window(slot)
+        if plan.pid_ticks:
+            self._set_pid_tick_timers(plan.epoch, plan.duration)
         self.async_write_ha_state()
 
-    async def _schedule_valve_window(
-        self,
-        open_at: float | None,
-        close_at: float | None,
-        epoch: float,
-        duration: float,
-    ) -> None:
-        """Open/close this on-off valve from unix times. No scale conversion."""
-        if self._hvac_on and self._hvac_on.stuck_loop:
-            self._logger.debug("PWM skipped: stuck_loop active")
-            return
+    async def _schedule_valve_window(self, slot) -> None:
+        """Open/close from slot times. Plan is assumed valid."""
         self._clear_pwm_timers()
-
         now = time.time()
-        min_on = START_MISALINGMENT
-        if self._hvac_on and duration > 0 and self._hvac_on.pwm_scale:
-            min_on = max(
-                self._hvac_on.pwm_threshold / self._hvac_on.pwm_scale * duration,
-                START_MISALINGMENT,
-            )
-        if (
-            open_at is None
-            or close_at is None
-            or close_at <= open_at
-            or close_at < now
-            or close_at - now < min_on
-        ):
+        if slot.is_closed:
             if self._is_valve_open():
                 await self._async_switch_turn_off()
             return
-
-        if (open_at - now > START_MISALINGMENT or close_at <= now) and self._is_valve_open():
-            await self._async_switch_turn_off()
-        elif open_at <= now < close_at:
+        if slot.is_open_at(now):
             await self._async_switch_turn_on()
-
-        if open_at > now:
-            self._set_pwm_start_timer(open_at)
-        full_window = close_at >= epoch + duration - 1e-6
-        if close_at > now and not full_window:
-            self._set_pwm_stop_timer(close_at)
-
-    async def _apply_local_valve(self) -> None:
-        """Actuate this room from current demand (standalone / uncoordinated)."""
-        if self._hvac_on and self._hvac_on.stuck_loop:
-            self._logger.debug("PWM skipped: stuck_loop active")
-            return
-        pwm = (self.control_output.get(ATTR_CONTROL_PWM_OUTPUT, 0) or 0) if self.control_output else 0
-        if (
-            self._hvac_on is None
-            or pwm <= 0
-            or self.preset_mode == PRESET_EMERGENCY
-            or self.control_is_idle()
-        ):
-            self._async_cancel_pwm_routines()
-            return
-
-        if self._hvac_on.is_hvac_on_off_mode:
-            await self._async_switch_turn_on()
-            return
-
-        duration = 0.0
-        if self._hvac_on.get_pwm_time:
-            duration = self._hvac_on.get_pwm_time.total_seconds()
-        if duration > 0:
-            scale = self._hvac_on.pwm_scale or 100
-            epoch = self._pwm_start_time or time.time()
-            on = min(pwm, scale) / scale * duration
-            await self._schedule_valve_window(epoch, epoch + on, epoch, duration)
-            return
-
-        if (
-            self._hvac_on.pwm_threshold > pwm
-            and self._is_valve_open()
-        ):
+        elif self._is_valve_open():
             await self._async_switch_turn_off()
-            return
-        self._clear_pwm_timers()
-        await self._async_switch_turn_on(control_val=pwm)
+        if slot.open_at is not None and slot.open_at > now:
+            self._set_pwm_start_timer(slot.open_at)
+        if slot.close_at is not None and slot.close_at > now:
+            self._set_pwm_stop_timer(slot.close_at)
 
     def switch_last_change(self):
         """Last valve movement, for circuit anti-calc idle checks."""
@@ -1043,8 +1034,11 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         return None
 
     async def run_stuck_prevention(self, force: bool = False) -> None:
-        """Open this valve briefly. Called by the circuit or the local service."""
-        await self._async_run_local_stuck_prevention(force)
+        """Rebuild this room's window as a stuck-loop plan (uncoordinated)."""
+        if self.is_coordinated:
+            return
+        await self.plan()
+        await self._commit_local_plan(time.time(), force_stuck=force)
 
     @callback
     def _async_routine_controller(self, interval=None) -> None:
@@ -1164,59 +1158,6 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 self._async_activate_emergency_stop("stale sensor", sensor=entity_id)
 
     @callback
-    def _async_stuck_switch_check(self, now) -> None:
-        """Check if the switch has not changed for a certain period and force operation to avoid stuck or jammed."""
-        if self.is_coordinated:
-            return
-        self._async_check_stuck_valves()
-
-    def _async_check_stuck_valves(self) -> None:
-        """Open a local valve if it has not moved for the stale duration."""
-        if self._hvac_on and self._is_valve_open():
-            return
-
-        # get data of all switches
-        entity_list = {}
-        for hvac_mode, mode_config in self._hvac_def.items():
-            if mode_config.get_switch_stale:
-                entity_list[hvac_mode] = [
-                    mode_config.get_hvac_switch,
-                    mode_config.get_switch_stale,
-                    mode_config.switch_last_change,
-                ]
-
-        if not entity_list:
-            self._logger.warning(
-                "jamming/stuck prevention activated but no duration set for switches"
-            )
-            return
-
-        # check each switch
-        for hvac_mode, data in entity_list.items():
-            # check if switch activated emergency mode
-            if data[0] in self._emergency_stop:
-                return
-
-            self._logger.debug(
-                "Switch '%s' stuck prevention check with last update '%s'",
-                data[0],
-                data[2],
-            )
-
-            # check if too long not operated
-            if datetime.datetime.now(datetime.UTC) - data[2] > data[1]:
-                self._logger.info(
-                    "Switch '%s' stuck prevention activated: not changed state for '%s'",
-                    data[0],
-                    datetime.datetime.now(datetime.UTC) - data[2],
-                )
-
-                # run short operation of switch
-                self.hass.async_create_task(
-                    self._async_toggle_switch(hvac_mode, data[0])
-                )
-
-    @callback
     def _async_switches_change(self, event: Event[EventStateChangedData]) -> None:
         """Handle device switch state changes."""
         new_state = event.data.get("new_state")
@@ -1271,7 +1212,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 for hvac_mode, data in self._hvac_def.items():
                     if (
                         data.get_hvac_switch == entity_id
-                        and not data.stuck_loop
+                        and not (self._circuit_plan and self._circuit_plan.stuck_loop)
                         and self._is_valve_open(hvac_mode=hvac_mode)
                     ):
                         self._logger.warning(
@@ -1315,12 +1256,9 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 "filtered sensor update temp '%.2f'", self._kf_temp.get_temp
             )
 
-        # if pid/pwm mode is active: do not call operate but let pid/pwm cycle handle it
-        if self._hvac_on is not None and self._hvac_on.is_hvac_on_off_mode:
-            self.hass.async_create_task(self._on_controller_timer())
-
+        # PID/PWM windows sample on their own ticks; on-off waits for the next plan.
         if current_temp:
-            self.async_write_ha_state()  # called from controller thus not needed here
+            self.async_write_ha_state()
 
     @callback
     def _async_update_outdoor_temperature(
@@ -1451,7 +1389,8 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 if self._hvac_on:
                     self._hvac_on.reset_control_output()
                     self.control_output = self._hvac_on.get_control_output
-                self.hass.async_create_task(self._apply_local_valve())
+                if not self.is_coordinated:
+                    self.hass.async_create_task(self._commit_local_plan(time.time()))
                 return
 
             if not self._hvac_on:
@@ -1476,20 +1415,18 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 "Obtained current control output: '%s'", self.control_output
             )
 
-            if force or self._hvac_on.is_hvac_on_off_mode:
-                self.hass.async_create_task(self._apply_local_valve())
+            if (force or self._hvac_on.is_hvac_on_off_mode) and not self.is_coordinated:
+                self.hass.async_create_task(self._commit_local_plan(time.time()))
 
             if self._hvac_on.is_hvac_switch_on_off:
                 self.async_write_ha_state()
 
     @callback
-    def _async_cancel_pwm_routines(self, hvac_mode: HVACMode | None = None, end_stuck_loop: bool = False) -> None:
-        """Cancel scheduled switch routines."""
+    def _async_cancel_pwm_routines(self, hvac_mode: HVACMode | None = None) -> None:
+        """Cancel scheduled switch routines and close the valve."""
         self._clear_pwm_timers()
         self.hass.async_create_task(
-            self._async_switch_turn_off(
-                hvac_mode=hvac_mode, end_stuck_loop=end_stuck_loop
-            )
+            self._async_switch_turn_off(hvac_mode=hvac_mode)
         )
 
     def _set_pwm_start_timer(self, when: float) -> None:
@@ -1614,17 +1551,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 context=self._context,
             )
 
-    @callback
-    def async_turn_switch_off_factory(self, hvac_mode: HVACMode | None = None, end_stuck_loop: bool = False) -> None:
-        """Generate turn on callbacks as factory."""
-
-        async def async_turn_off_switch(now: datetime.datetime):
-            """Turn off specific switch."""
-            await self._async_switch_turn_off(hvac_mode=hvac_mode, end_stuck_loop=end_stuck_loop)
-
-        return async_turn_off_switch
-
-    async def _async_switch_turn_off(self, hvac_mode: HVACMode | None = None, end_stuck_loop: bool = False) -> None:
+    async def _async_switch_turn_off(self, hvac_mode: HVACMode | None = None) -> None:
         """Close valve.
 
         NC/NO aware: NC converted to NO
@@ -1636,26 +1563,14 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             self._logger.debug("No switch defined for %s", hvac_mode)
             return
 
-        # PWM (and other callers) must not close the valve or drop protection
-        # while anti-calc holds it. Only the flush timeout / HVAC-off / emergency
-        # may end the stuck loop.
-        if _hvac_on.stuck_loop and not end_stuck_loop:
-            self._logger.debug("Turn OFF skipped: stuck_loop active")
-            return
-
-        # operate on-off switch
         if _hvac_on.is_hvac_switch_on_off:
             if not self._is_valve_open(hvac_mode=hvac_mode):
                 self._logger.debug("Switch already OFF")
-                if end_stuck_loop and _hvac_on.stuck_loop:
-                    _hvac_on.stuck_loop = False
-                    self.async_write_ha_state()
                 return
 
             data = {ATTR_ENTITY_ID: entity_id}
             self._logger.debug("Order 'OFF' sent to switch device '%s'", entity_id)
 
-            # NC-NO conversion
             if _hvac_on.get_hvac_switch_mode == NC_SWITCH_MODE:
                 operation = SERVICE_TURN_OFF
             else:
@@ -1664,8 +1579,6 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             await self.hass.services.async_call(
                 HA_DOMAIN, operation, data, context=self._context
             )
-
-        # operate propoertional valve
         else:
             self._logger.debug(
                 "Change state of switch '%s' to '%s'",
@@ -1688,88 +1601,9 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 context=self._context,
             )
 
-        if end_stuck_loop and _hvac_on.stuck_loop:
-            _hvac_on.stuck_loop = False
-            self.async_write_ha_state()
-
     async def async_run_stuck_prevention(self, force: bool = False) -> None:
-        """Open the valve briefly to prevent sticking (anti-calc)."""
-        await self._async_run_local_stuck_prevention(force)
-
-    async def _async_run_local_stuck_prevention(self, force: bool = False) -> None:
-        """Open this entity's valve briefly to prevent sticking."""
-        if self.preset_mode == PRESET_EMERGENCY:
-            self._logger.warning("stuck_prevention skipped: emergency mode")
-            return
-
-        hvac_mode = self._hvac_mode if self._hvac_on else HVACMode.HEAT
-        if hvac_mode == HVACMode.OFF:
-            if HVACMode.HEAT in self._hvac_def:
-                hvac_mode = HVACMode.HEAT
-            elif HVACMode.COOL in self._hvac_def:
-                hvac_mode = HVACMode.COOL
-            else:
-                return
-
-        found_mode, hvac_on, entity_id = self.get_hvac_data(hvac_mode)
-        if not found_mode or not hvac_on or not entity_id:
-            self._logger.warning(
-                "stuck_prevention skipped: no switch for '%s'", hvac_mode
-            )
-            return
-
-        if hvac_on.stuck_loop:
-            self._logger.debug("stuck_prevention skipped: already active")
-            return
-
-        if self._is_valve_open(hvac_mode=hvac_mode):
-            self._logger.debug(
-                "stuck_prevention skipped: valve '%s' already open", entity_id
-            )
-            return
-
-        if not hvac_on.get_switch_stale_open_time:
-            self._logger.warning(
-                "stuck_prevention skipped: no opening time for '%s'", entity_id
-            )
-            return
-
-        await self._async_toggle_switch(hvac_mode, entity_id)
-
-    async def _async_toggle_switch(self, hvac_mode: HVACMode, entity_id: str) -> None:
-        """Toggle the state of a switch temporarily and hereafter set it to 0 or 1."""
-
-        _, _hvac_on, _ = self.get_hvac_data(hvac_mode)
-        if not _hvac_on:
-            return
-
-        duration = _hvac_on.get_switch_stale_open_time
-        _hvac_on.stuck_loop = True
-        self.async_write_ha_state()
-
-        self._logger.info(
-            "switch '%s' toggle state temporarily to ON for %s sec",
-            entity_id,
-            duration,
-        )
-
-        # Drop pending PWM on/off so a scheduled pulse end cannot close the valve.
-        self._clear_pwm_timers()
-
-        # NO-NC conversion
-        if _hvac_on.get_hvac_switch_mode == NC_SWITCH_MODE:
-            control_val = 0
-        else:
-            control_val = _hvac_on.pwm_scale
-
-        await self._async_switch_turn_on(hvac_mode=hvac_mode, control_val=control_val)
-
-        # schedule toggle
-        async_track_point_in_utc_time(
-            self.hass,
-            self.async_turn_switch_off_factory(hvac_mode=hvac_mode, end_stuck_loop=True),
-            datetime.datetime.fromtimestamp(time.time() + duration.total_seconds()),
-        )
+        """Rebuild this room's window as a stuck-loop plan (uncoordinated)."""
+        await self.run_stuck_prevention(force)
 
     @callback
     def _async_activate_emergency_stop(self, source: str, sensor: str) -> None:
@@ -1786,7 +1620,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                     self.async_set_preset_mode(PRESET_EMERGENCY)
                 )
                 # cancel scheduled switch routines
-                self._async_cancel_pwm_routines(end_stuck_loop=True)
+                self._async_cancel_pwm_routines()
         else:
             self._logger.debug("Emergency OFF recall send from %s", source)
 
@@ -1866,23 +1700,21 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             ):
                 self._hvac_on.reset_control_output()
                 self.control_output = self._hvac_on.get_control_output
-                self._async_cancel_pwm_routines()
+                if not self.is_coordinated:
+                    await self._commit_local_plan(time.time())
+                else:
+                    self._async_cancel_pwm_routines()
             elif (
                 old_preset in (PRESET_STANDBY, PRESET_EMERGENCY)
                 and self._preset_mode not in (PRESET_STANDBY, PRESET_EMERGENCY)
             ):
                 if self._hvac_on.is_prop_pid_mode:
                     self._hvac_on.pid_reset_time()
-                if self._hvac_on.is_hvac_on_off_mode:
-                    await self._on_controller_timer(force=True)
-                elif self._owns_epoch_loop():
+                if not self.is_coordinated:
                     await self.plan()
-                    await self._apply_local_valve()
+                    await self._commit_local_plan(time.time())
             elif self.preset_mode != PRESET_EMERGENCY:
-                if self._hvac_on.is_hvac_on_off_mode:
-                    await self._on_controller_timer(force=True)
-                else:
-                    await self.plan()
+                await self.plan()
 
         elif self._old_mode != HVACMode.OFF:
             self._logger.debug(

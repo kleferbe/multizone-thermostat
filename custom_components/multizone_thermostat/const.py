@@ -39,9 +39,11 @@ DEFAULT_HYSTERESIS_TOLERANCE = 0.5
 # PWM/PID controller
 DEFAULT_PWM_SCALE = 100
 DEFAULT_MIN_DIFF = 0
-DEFAULT_PWM = 0
+DEFAULT_PWM = 0  # rooms: 0 = proportional valve, no PWM window
 DEFAULT_PWM_RESOLUTION = 50
 DEFAULT_MASTER_SCALE_BOUND = 1
+MIN_PWM_DURATION = timedelta(seconds=60)
+DEFAULT_CIRCUIT_PWM = timedelta(minutes=15)
 
 # MASTER
 DEFAULT_OPERATION = "on_off"
@@ -70,6 +72,7 @@ ATTR_ANTI_CALC_ACTIVE = "anti_calc_active"
 ATTR_SATELLITES = "satellites"
 ATTR_TOTAL_AREA = "total_area"
 ATTR_CIRCUIT = "circuit"
+ATTR_CIRCUIT_PLAN = "circuit_plan"
 
 PRESET_EMERGENCY = "emergency"
 PRESET_RESTORE = "restore"

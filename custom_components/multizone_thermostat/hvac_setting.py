@@ -27,7 +27,6 @@ from .const import (
     ATTR_KP,
     ATTR_LAST_SWITCH_CHANGE,
     ATTR_SAT_ALLOWED,
-    ATTR_STUCK_LOOP,
     CONF_CONTINUOUS_LOWER_LOAD,
     CONF_CONTROL_REFRESH_INTERVAL,
     CONF_EXTRA_PRESETS,
@@ -121,8 +120,6 @@ class HVACSetting:
         self._satelites = {}
         self._registered_satelites: list[str] = []
         self.nesting = None
-
-        self._stuck_loop = False
 
         self._on_off = self._hvac_settings.get(CONF_ON_OFF_MODE)
         self._proportional = self._hvac_settings.get(CONF_PROPORTIONAL_MODE)
@@ -496,16 +493,6 @@ class HVACSetting:
         )
 
     @property
-    def stuck_loop(self) -> bool:
-        """Return if stuck loop is active."""
-        return self._stuck_loop
-
-    @stuck_loop.setter
-    def stuck_loop(self, val: bool) -> None:
-        """Set state stuck loop."""
-        self._stuck_loop = val
-
-    @property
     def switch_last_change(self) -> datetime.datetime:
         """Return last time valve opened for stale check."""
         return self._last_change
@@ -829,7 +816,6 @@ class HVACSetting:
         tmp_dict[ATTR_CONTROL_OUTPUT] = self.get_control_output
         tmp_dict[ATTR_DETAILED_OUTPUT] = self.detailed_output
         tmp_dict[ATTR_LAST_SWITCH_CHANGE] = self.switch_last_change
-        tmp_dict[ATTR_STUCK_LOOP] = self.stuck_loop
         tmp_dict["Open_window"] = open_window
 
         if self.is_hvac_proportional_mode:
