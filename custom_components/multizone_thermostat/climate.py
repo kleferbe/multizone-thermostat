@@ -831,7 +831,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
     def _plan_builder_for(
         self, setting: hvac_setting.HVACSetting
     ) -> CircuitPlanBuilder:
-        """Room builder for an active heat or cool setting; no plant."""
+        """Room builder for an active heat or cool setting; no circuit actuator."""
         pwm = setting.pwm_duration.total_seconds() if setting.pwm_duration else 0.0
         if pwm > 0:
             duration = pwm
@@ -995,7 +995,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         if slot is None and plan.rooms:
             slot = plan.rooms[0]
         if slot is None:
-            slot = plan.plant if plan.plant.entity_id else ValveSlot(entity_id=self.entity_id)
+            slot = plan.circuit if plan.circuit.entity_id else ValveSlot(entity_id=self.entity_id)
 
         self._clear_pwm_timers()
         if slot.position is not None:

@@ -105,7 +105,7 @@ class CircuitPlan:
     duration: float
     hvac_mode: HVACMode | None
     idle: bool
-    plant: ValveSlot
+    circuit: ValveSlot
     rooms: list[ValveSlot] = field(default_factory=list)
     stuck_loop: bool = False
     pid_ticks: bool = False
@@ -115,20 +115,20 @@ class CircuitPlan:
         return self.epoch + self.duration
 
     def slot_for(self, entity_id: str) -> ValveSlot | None:
-        """Plant or room slot, or None when this entity is not in the plan."""
-        if self.plant.entity_id == entity_id:
-            return self.plant
+        """Circuit or room slot, or None when this entity is not in the plan."""
+        if self.circuit.entity_id == entity_id:
+            return self.circuit
         for slot in self.rooms:
             if slot.entity_id == entity_id:
                 return slot
         return None
 
     def copy_for(self, entity_id: str) -> CircuitPlan:
-        """Copy this window with only the named valve."""
+        """Copy for one room (or the circuit switch). The circuit slot stays."""
         slot = self.slot_for(entity_id) or ValveSlot(entity_id=entity_id)
-        if entity_id == self.plant.entity_id:
-            return replace(self, plant=slot, rooms=[])
-        return replace(self, plant=ValveSlot(entity_id=""), rooms=[slot])
+        if entity_id == self.circuit.entity_id:
+            return replace(self, circuit=slot, rooms=[])
+        return replace(self, rooms=[slot])
 
     def as_dict(self) -> dict:
         return {
@@ -139,7 +139,7 @@ class CircuitPlan:
             "idle": self.idle,
             "pid_ticks": self.pid_ticks,
             "hvac_mode": str(self.hvac_mode) if self.hvac_mode else None,
-            "plant": self.plant.as_dict(),
+            "circuit": self.circuit.as_dict(),
             "rooms": [slot.as_dict() for slot in self.rooms],
         }
 
@@ -149,7 +149,7 @@ class CircuitPlan:
         epoch: float,
         duration: float,
         hvac_mode: HVACMode | None,
-        plant_entity_id: str = "",
+        circuit_entity_id: str = "",
     ) -> CircuitPlan:
         """Mode idle: everything closed, no PID ticks."""
         return cls(
@@ -159,7 +159,7 @@ class CircuitPlan:
             idle=True,
             stuck_loop=False,
             pid_ticks=False,
-            plant=ValveSlot(entity_id=plant_entity_id),
+            circuit=ValveSlot(entity_id=circuit_entity_id),
             rooms=[],
         )
 
@@ -178,7 +178,7 @@ class CircuitPlanBuilder:
         min_load: float,
         min_valve: float,
         valve_lag: float,
-        plant_entity_id: str | None = None,
+        circuit_entity_id: str | None = None,
     ) -> None:
         self._name = name
         self._duration = duration
@@ -189,12 +189,12 @@ class CircuitPlanBuilder:
         self._min_load = min_load
         self._min_valve = min_valve
         self._valve_lag = valve_lag
-        self._plant_entity_id = plant_entity_id
+        self._circuit_entity_id = circuit_entity_id
 
     @property
-    def _plant_id(self) -> str:
-        """Plant switch id, or empty when this builder has no plant."""
-        return self._plant_entity_id or ""
+    def _circuit_id(self) -> str:
+        """Circuit switch id, or empty when this builder has no circuit actuator."""
+        return self._circuit_entity_id or ""
 
     @classmethod
     def create(
@@ -208,7 +208,7 @@ class CircuitPlanBuilder:
         min_load: float = 0.0,
         min_valve: float = 0.0,
         valve_lag: float = 0.0,
-        plant_entity_id: str | None = None,
+        circuit_entity_id: str | None = None,
         name: str = "circuit",
     ) -> CircuitPlanBuilder:
         return cls(
@@ -221,12 +221,12 @@ class CircuitPlanBuilder:
             min_load=min_load,
             min_valve=min_valve,
             valve_lag=valve_lag,
-            plant_entity_id=plant_entity_id,
+            circuit_entity_id=circuit_entity_id,
         )
 
     @classmethod
     def create_off(cls, *, name: str = "climate") -> CircuitPlanBuilder:
-        """Room builder while HVAC is off: no plant, closed windows."""
+        """Room builder while HVAC is off: no circuit actuator, closed windows."""
         return cls.create(name=name, duration=0.0)
 
     def idle(
@@ -235,7 +235,7 @@ class CircuitPlanBuilder:
         hvac_mode: HVACMode | None,
     ) -> CircuitPlan:
         return CircuitPlan.idle_plan(
-            epoch, self._duration, hvac_mode, self._plant_id
+            epoch, self._duration, hvac_mode, self._circuit_id
         )
 
     def build(
@@ -255,7 +255,7 @@ class CircuitPlanBuilder:
                 idle=False,
                 stuck_loop=False,
                 pid_ticks=True,
-                plant=ValveSlot(entity_id=self._plant_id),
+                circuit=ValveSlot(entity_id=self._circuit_id),
                 rooms=[],
             )
 
@@ -282,20 +282,20 @@ class CircuitPlanBuilder:
         occupancy = nesting.window_occupancy()
 
         step = duration / self._pwm_resolution
-        plant_on = _round_to_step(occupancy.plant_duration * duration, step)
-        plant = self._timed_slot(
-            self._plant_id,
+        circuit_on = _round_to_step(occupancy.plant_duration * duration, step)
+        circuit = self._timed_slot(
+            self._circuit_id,
             epoch + occupancy.plant_start * duration + self._valve_lag,
-            plant_on,
+            circuit_on,
             duration,
             pwm_scale=self._pwm_scale,
             pwm_threshold=self._pwm_threshold,
         )
-        plant_duty = 0.0
-        if not plant.is_closed:
-            close = plant.close_at if plant.close_at is not None else epoch + duration
-            open_at = plant.open_at if plant.open_at is not None else epoch
-            plant_duty = max(0.0, (close - open_at) / duration)
+        circuit_duty = 0.0
+        if not circuit.is_closed:
+            close = circuit.close_at if circuit.close_at is not None else epoch + duration
+            open_at = circuit.open_at if circuit.open_at is not None else epoch
+            circuit_duty = max(0.0, (close - open_at) / duration)
 
         demand_by_id = {demand.entity_id: demand for demand in demands}
         rooms: list[ValveSlot] = []
@@ -319,7 +319,7 @@ class CircuitPlanBuilder:
             bound = demand.master_scaled_bound or 1.0
             master_util = 1.0
             if bound > 1:
-                master_util = max(1 / bound, plant_duty)
+                master_util = max(1 / bound, circuit_duty)
             position = round(
                 max(0, min(demand.pwm / master_util, demand.pwm_scale)),
                 0,
@@ -336,7 +336,7 @@ class CircuitPlanBuilder:
             idle=False,
             stuck_loop=False,
             pid_ticks=True,
-            plant=plant,
+            circuit=circuit,
             rooms=rooms,
         )
 
@@ -368,21 +368,21 @@ class CircuitPlanBuilder:
             last_close = max(last_close, close_at)
             t = close_at
         duration = max(last_close - epoch, 0.0)
-        if self._plant_entity_id and rooms and not rooms[0].is_closed:
-            plant_open = epoch + self._valve_lag
-            plant = ValveSlot(
-                entity_id=self._plant_id,
-                open_at=plant_open,
-                close_at=last_close if last_close > plant_open else None,
+        if self._circuit_entity_id and rooms and not rooms[0].is_closed:
+            circuit_open = epoch + self._valve_lag
+            circuit = ValveSlot(
+                entity_id=self._circuit_id,
+                open_at=circuit_open,
+                close_at=last_close if last_close > circuit_open else None,
             )
-            if plant.close_at is not None and plant.close_at <= plant.open_at:
-                plant = ValveSlot(
-                    entity_id=self._plant_id,
-                    open_at=plant_open,
+            if circuit.close_at is not None and circuit.close_at <= circuit.open_at:
+                circuit = ValveSlot(
+                    entity_id=self._circuit_id,
+                    open_at=circuit_open,
                     close_at=None,
                 )
         else:
-            plant = ValveSlot(entity_id=self._plant_id)
+            circuit = ValveSlot(entity_id=self._circuit_id)
         return CircuitPlan(
             epoch=epoch,
             duration=duration,
@@ -390,7 +390,7 @@ class CircuitPlanBuilder:
             idle=False,
             stuck_loop=True,
             pid_ticks=False,
-            plant=plant,
+            circuit=circuit,
             rooms=rooms,
         )
 

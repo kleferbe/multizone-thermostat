@@ -195,7 +195,7 @@ def _register_services() -> None:
 
 
 class CircuitSelect(SelectEntity, RestoreEntity):
-    """Coordinates room climates: nesting, plant PWM, sequential anti-calc."""
+    """Coordinates room climates: nesting, circuit PWM, sequential anti-calc."""
 
     _attr_should_poll = False
 
@@ -249,7 +249,7 @@ class CircuitSelect(SelectEntity, RestoreEntity):
             min_load=self._min_load,
             min_valve=self._min_valve,
             valve_lag=self._valve_lag,
-            plant_entity_id=self._switch_entity,
+            circuit_entity_id=self._switch_entity,
         )
 
     @property
@@ -259,7 +259,7 @@ class CircuitSelect(SelectEntity, RestoreEntity):
 
     @property
     def is_coordinated(self) -> bool:
-        """True when rooms are nested and the plant is PWM'd."""
+        """True when rooms are nested and the circuit is PWM'd."""
         return self._attr_current_option in (CircuitMode.HEAT, CircuitMode.COOL)
 
     @property
@@ -269,7 +269,7 @@ class CircuitSelect(SelectEntity, RestoreEntity):
 
     @property
     def is_standby(self) -> bool:
-        """True when the plant is out of climate service."""
+        """True when the circuit is out of climate service."""
         return self._attr_current_option == CircuitMode.STANDBY
 
     @property
@@ -362,7 +362,7 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         if option == CircuitMode.UNCOORDINATED:
             self._clear_epoch_timer()
             self._clear_pwm_timers()
-            await self._async_plant_off()
+            await self._async_circuit_off()
             self._circuit_plan = None
             for sat in members:
                 sat.start_room_control()
@@ -471,18 +471,18 @@ class CircuitSelect(SelectEntity, RestoreEntity):
 
     async def _apply_window(self, plan: CircuitPlan) -> None:
         self._circuit_plan = plan
-        await self._schedule_plant(plan)
+        await self._apply_circuit_slot(plan)
         for sat in async_get_registry(self.hass).members(self.entity_id):
             await sat.apply_plan(plan.copy_for(sat.entity_id))
         self._set_epoch_timer(plan.window_end)
         self.async_write_ha_state()
 
-    async def _schedule_plant(self, plan: CircuitPlan) -> None:
+    async def _apply_circuit_slot(self, plan: CircuitPlan) -> None:
         self._clear_pwm_timers()
-        await plan.plant.apply_on_off_slot(
+        await plan.circuit.apply_on_off_slot(
             time.time(),
-            self._async_plant_on,
-            self._async_plant_off,
+            self._async_circuit_on,
+            self._async_circuit_off,
             self._set_pwm_start_timer,
             self._set_pwm_stop_timer,
         )
@@ -530,12 +530,12 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         self._clear_pwm_stop_timer()
 
     async def _on_pwm_start_timer(self, _now: datetime.datetime | None = None) -> None:
-        await self._async_plant_on()
+        await self._async_circuit_on()
 
     async def _on_pwm_stop_timer(self, _now: datetime.datetime | None = None) -> None:
-        await self._async_plant_off()
+        await self._async_circuit_off()
 
-    def _is_plant_on(self) -> bool:
+    def _is_circuit_on(self) -> bool:
         state = self.hass.states.get(self._switch_entity)
         if state is None or state.state in ERROR_STATE:
             return False
@@ -543,8 +543,8 @@ class CircuitSelect(SelectEntity, RestoreEntity):
             return state.state == STATE_ON
         return state.state == STATE_OFF
 
-    async def _async_plant_on(self) -> None:
-        if self._is_plant_on():
+    async def _async_circuit_on(self) -> None:
+        if self._is_circuit_on():
             return
         operation = (
             SERVICE_TURN_ON if self._switch_mode == NC_SWITCH_MODE else SERVICE_TURN_OFF
@@ -556,8 +556,8 @@ class CircuitSelect(SelectEntity, RestoreEntity):
             context=self._context,
         )
 
-    async def _async_plant_off(self) -> None:
-        if not self._is_plant_on():
+    async def _async_circuit_off(self) -> None:
+        if not self._is_circuit_on():
             return
         operation = (
             SERVICE_TURN_OFF if self._switch_mode == NC_SWITCH_MODE else SERVICE_TURN_ON
@@ -576,7 +576,7 @@ class CircuitSelect(SelectEntity, RestoreEntity):
             return
         if new_state.state in ERROR_STATE:
             self._logger.warning(
-                "Plant switch '%s' is %s", self._switch_entity, new_state.state
+                "Circuit switch '%s' is %s", self._switch_entity, new_state.state
             )
         self.async_write_ha_state()
 
