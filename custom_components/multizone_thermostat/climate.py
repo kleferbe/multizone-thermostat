@@ -278,6 +278,9 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 self._area,
                 detailed_output,
             )
+        self._plan_builder = CircuitPlanBuilder.create_off(
+            name=self._attr_name or "climate"
+        )
 
         self._logger = logging.getLogger(DOMAIN).getChild(name)
 
@@ -734,6 +737,9 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 self._logger.info(
                     "HVAC mode is OFF. Turn the devices OFF and exit hvac change"
                 )
+                self._plan_builder = CircuitPlanBuilder.create_off(
+                    name=self._attr_name or "climate"
+                )
                 if not self.is_coordinated:
                     await self._apply_window(self._build_window(time.time()))
                 self.async_write_ha_state()
@@ -745,6 +751,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 )
 
             self._active_hvac_setting = setting
+            self._plan_builder = self._plan_builder_for(setting)
             if self.is_idle:
                 self._active_hvac_setting.reset_control_output()
                 self.control_output = self._active_hvac_setting.control_output
@@ -821,6 +828,25 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             self._active_hvac_setting.time_offset = 0
         await self._apply_window(self._build_window(epoch))
 
+    def _plan_builder_for(
+        self, setting: hvac_setting.HVACSetting
+    ) -> CircuitPlanBuilder:
+        """Room builder for an active heat or cool setting; no plant."""
+        pwm = setting.pwm_duration.total_seconds() if setting.pwm_duration else 0.0
+        if pwm > 0:
+            duration = pwm
+        elif setting.control_interval:
+            duration = setting.control_interval.total_seconds()
+        else:
+            duration = 0.0
+        return CircuitPlanBuilder.create(
+            name=self._attr_name or "climate",
+            duration=duration,
+            pwm_scale=setting.pwm_scale,
+            pwm_threshold=setting.pwm_threshold,
+            pwm_resolution=setting.pwm_resolution,
+        )
+
     def _nominal_window(self) -> float:
         if self._active_hvac_setting and self._active_hvac_setting.pwm_duration:
             pwm = self._active_hvac_setting.pwm_duration.total_seconds()
@@ -845,8 +871,8 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             and self._local_stale()
             and check_time_in_window(epoch, window, self._passive_switch_time)
         ):
-            return CircuitPlanBuilder.stuck_local(
-                epoch, hvac_mode, entity_id, open_s
+            return self._plan_builder.build_stuck_loop(
+                epoch, hvac_mode, [entity_id], open_s, 0.0
             )
 
         if (
@@ -854,29 +880,32 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             or self.preset_mode == PRESET_EMERGENCY
             or self.is_idle
         ):
-            return CircuitPlan.idle_plan(epoch, window, hvac_mode, entity_id)
+            return self._plan_builder.idle(epoch, hvac_mode)
 
-        pwm = (self.control_output.get(ATTR_CONTROL_PWM_OUTPUT, 0) or 0) if self.control_output else 0
-        pwm_scale = self._active_hvac_setting.pwm_scale if self._active_hvac_setting else 100
-        pwm_duration = (
-            self._active_hvac_setting.pwm_duration.total_seconds() if self._active_hvac_setting else 0
-        )
-        threshold = self._active_hvac_setting.pwm_threshold if self._active_hvac_setting else 0
-        operate = (
-            self._active_hvac_setting.control_interval.total_seconds()
-            if self._active_hvac_setting and self._active_hvac_setting.control_interval
-            else 0.0
-        )
-        return CircuitPlanBuilder.build_local(
-            epoch,
-            hvac_mode,
-            entity_id,
-            pwm,
-            pwm_scale,
-            pwm_duration,
-            threshold,
-            on_off=bool(self._active_hvac_setting and self._active_hvac_setting.is_on_off),
-            operate_cycle=operate,
+        demand = self.get_demand(hvac_mode)
+        if (
+            demand is None
+            and entity_id
+            and self._active_hvac_setting
+            and self._active_hvac_setting.is_on_off
+        ):
+            pwm = (
+                (self.control_output.get(ATTR_CONTROL_PWM_OUTPUT, 0) or 0)
+                if self.control_output
+                else 0
+            )
+            if pwm > 0:
+                demand = RoomDemand(
+                    entity_id=entity_id,
+                    area=self._area,
+                    pwm=pwm,
+                    pwm_scale=self._active_hvac_setting.pwm_scale,
+                    pwm_duration=0.0,
+                    master_scaled_bound=1.0,
+                )
+        demands = [demand] if demand else []
+        return self._plan_builder.build(
+            epoch, hvac_mode, demands, tot_area=self._area
         )
 
     def _local_stale(self) -> bool:
@@ -1004,8 +1033,8 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             return
         hvac_mode = self._hvac_mode if self._hvac_mode != HVACMode.OFF else None
         await self._apply_window(
-            CircuitPlanBuilder.stuck_local(
-                time.time(), hvac_mode, self.entity_id, open_s
+            self._plan_builder.build_stuck_loop(
+                time.time(), hvac_mode, [self.entity_id], open_s, 0.0
             )
         )
 

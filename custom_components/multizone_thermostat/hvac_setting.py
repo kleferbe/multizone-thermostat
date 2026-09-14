@@ -53,6 +53,7 @@ from .const import (
     CONF_TARGET_TEMP_MIN,
     CONF_WC_MODE,
     CONF_WINDOW_OPEN_TEMPDROP,
+    DEFAULT_PWM_RESOLUTION,
     PRESET_EMERGENCY,
     PRESET_RESTORE,
     PRESET_STANDBY,
@@ -363,7 +364,9 @@ class HVACSetting:
 
     @property
     def pwm_resolution(self) -> float:
-        return self._proportional[CONF_PWM_RESOLUTION]
+        if self.is_proportional:
+            return self._proportional[CONF_PWM_RESOLUTION]
+        return DEFAULT_PWM_RESOLUTION
 
     @property
     def pwm_scale(self) -> float:

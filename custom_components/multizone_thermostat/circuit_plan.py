@@ -12,6 +12,9 @@ from .const import (
     CONF_AREA,
     CONF_PWM_DURATION,
     CONF_PWM_SCALE,
+    DEFAULT_MIN_DIFF,
+    DEFAULT_PWM_RESOLUTION,
+    DEFAULT_PWM_SCALE,
     NestingMode,
 )
 from .pwm_nesting import Nesting
@@ -175,7 +178,7 @@ class CircuitPlanBuilder:
         min_load: float,
         min_valve: float,
         valve_lag: float,
-        plant_entity_id: str,
+        plant_entity_id: str | None = None,
     ) -> None:
         self._name = name
         self._duration = duration
@@ -188,19 +191,24 @@ class CircuitPlanBuilder:
         self._valve_lag = valve_lag
         self._plant_entity_id = plant_entity_id
 
+    @property
+    def _plant_id(self) -> str:
+        """Plant switch id, or empty when this builder has no plant."""
+        return self._plant_entity_id or ""
+
     @classmethod
     def create(
         cls,
         *,
         duration: float,
-        operation_mode: NestingMode,
-        pwm_scale: float,
-        pwm_threshold: float,
-        pwm_resolution: float,
-        min_load: float,
-        min_valve: float,
-        valve_lag: float,
-        plant_entity_id: str,
+        pwm_scale: float = DEFAULT_PWM_SCALE,
+        pwm_threshold: float = DEFAULT_MIN_DIFF,
+        pwm_resolution: float = DEFAULT_PWM_RESOLUTION,
+        operation_mode: NestingMode = NestingMode.MASTER_BALANCED,
+        min_load: float = 0.0,
+        min_valve: float = 0.0,
+        valve_lag: float = 0.0,
+        plant_entity_id: str | None = None,
         name: str = "circuit",
     ) -> CircuitPlanBuilder:
         return cls(
@@ -216,13 +224,18 @@ class CircuitPlanBuilder:
             plant_entity_id=plant_entity_id,
         )
 
+    @classmethod
+    def create_off(cls, *, name: str = "climate") -> CircuitPlanBuilder:
+        """Room builder while HVAC is off: no plant, closed windows."""
+        return cls.create(name=name, duration=0.0)
+
     def idle(
         self,
         epoch: float,
         hvac_mode: HVACMode | None,
     ) -> CircuitPlan:
         return CircuitPlan.idle_plan(
-            epoch, self._duration, hvac_mode, self._plant_entity_id
+            epoch, self._duration, hvac_mode, self._plant_id
         )
 
     def build(
@@ -242,7 +255,7 @@ class CircuitPlanBuilder:
                 idle=False,
                 stuck_loop=False,
                 pid_ticks=True,
-                plant=ValveSlot(entity_id=self._plant_entity_id),
+                plant=ValveSlot(entity_id=self._plant_id),
                 rooms=[],
             )
 
@@ -271,7 +284,7 @@ class CircuitPlanBuilder:
         step = duration / self._pwm_resolution
         plant_on = _round_to_step(occupancy.plant_duration * duration, step)
         plant = self._timed_slot(
-            self._plant_entity_id,
+            self._plant_id,
             epoch + occupancy.plant_start * duration + self._valve_lag,
             plant_on,
             duration,
@@ -355,21 +368,21 @@ class CircuitPlanBuilder:
             last_close = max(last_close, close_at)
             t = close_at
         duration = max(last_close - epoch, 0.0)
-        if rooms and not rooms[0].is_closed:
+        if self._plant_entity_id and rooms and not rooms[0].is_closed:
             plant_open = epoch + self._valve_lag
             plant = ValveSlot(
-                entity_id=self._plant_entity_id,
+                entity_id=self._plant_id,
                 open_at=plant_open,
                 close_at=last_close if last_close > plant_open else None,
             )
             if plant.close_at is not None and plant.close_at <= plant.open_at:
                 plant = ValveSlot(
-                    entity_id=self._plant_entity_id,
+                    entity_id=self._plant_id,
                     open_at=plant_open,
                     close_at=None,
                 )
         else:
-            plant = ValveSlot(entity_id=self._plant_entity_id)
+            plant = ValveSlot(entity_id=self._plant_id)
         return CircuitPlan(
             epoch=epoch,
             duration=duration,
@@ -379,84 +392,6 @@ class CircuitPlanBuilder:
             pid_ticks=False,
             plant=plant,
             rooms=rooms,
-        )
-
-    @staticmethod
-    def stuck_local(
-        epoch: float,
-        hvac_mode: HVACMode | None,
-        entity_id: str,
-        open_s: float,
-    ) -> CircuitPlan:
-        """Single-valve flush window."""
-        close_at = epoch + open_s if open_s > 0 else None
-        if close_at is not None and close_at <= epoch:
-            slot = ValveSlot(entity_id=entity_id)
-            duration = 0.0
-        elif close_at is None:
-            slot = ValveSlot(entity_id=entity_id, open_at=epoch, close_at=None)
-            duration = 0.0
-        else:
-            slot = ValveSlot(entity_id=entity_id, open_at=epoch, close_at=close_at)
-            duration = open_s
-        return CircuitPlan(
-            epoch=epoch,
-            duration=duration,
-            hvac_mode=hvac_mode,
-            idle=False,
-            stuck_loop=True,
-            pid_ticks=False,
-            plant=ValveSlot(entity_id=""),
-            rooms=[slot],
-        )
-
-    @staticmethod
-    def build_local(
-        epoch: float,
-        hvac_mode: HVACMode | None,
-        entity_id: str,
-        pwm: float,
-        pwm_scale: float,
-        pwm_duration: float,
-        pwm_threshold: float,
-        *,
-        on_off: bool = False,
-        operate_cycle: float = 0.0,
-    ) -> CircuitPlan:
-        """One-room heating plan (uncoordinated / standalone)."""
-        if on_off:
-            duration = operate_cycle if operate_cycle > 0 else 0.0
-            if pwm > 0:
-                slot = ValveSlot(entity_id=entity_id, open_at=epoch, close_at=None)
-            else:
-                slot = ValveSlot(entity_id=entity_id)
-        elif pwm_duration > 0:
-            duration = pwm_duration
-            on = min(max(pwm, 0.0), pwm_scale) / pwm_scale * duration
-            slot = CircuitPlanBuilder._timed_slot(
-                entity_id,
-                epoch,
-                on,
-                duration,
-                pwm_scale=pwm_scale,
-                pwm_threshold=pwm_threshold,
-            )
-        else:
-            duration = operate_cycle if operate_cycle > 0 else 0.0
-            if pwm <= 0:
-                slot = ValveSlot(entity_id=entity_id)
-            else:
-                slot = ValveSlot(entity_id=entity_id, position=pwm)
-
-        return CircuitPlan(
-            epoch=epoch,
-            duration=duration,
-            hvac_mode=hvac_mode,
-            idle=False,
-            stuck_loop=False,
-            pid_ticks=True,
-            plant=ValveSlot(entity_id=""),
-            rooms=[slot],
         )
 
     @staticmethod
