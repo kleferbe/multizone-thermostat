@@ -26,6 +26,7 @@ DEFAULT_MIN_VALVE_PWM = 0  # factor of master pwm
 DEFAULT_PASSIVE_SWITCH = False
 DEFAULT_PASSIVE_SWITCH_OPEN_TIME = timedelta(seconds=60)
 DEFAULT_PASSIVE_SWITCH_GAP = timedelta(seconds=0)
+DEFAULT_PASSIVE_SWITCH_TOGGLES_ENTITY = True
 DEFAULT_PASSIVE_CHECK_TIME = "02:00"
 
 # restore old states
@@ -91,6 +92,7 @@ CONF_EXTRA_PRESETS = "extra_presets"
 CONF_PASSIVE_SWITCH_DURATION = "passive_switch_duration"
 CONF_PASSIVE_SWITCH_OPEN_TIME = "passive_switch_opening_time"
 CONF_PASSIVE_SWITCH_GAP = "passive_switch_gap"
+CONF_PASSIVE_SWITCH_TOGGLES_ENTITY = "passive_switch_toggles_entity"
 CONF_PASSIVE_CHECK_TIME = "passive_switch_check_time"
 CONF_INCLUDE_VALVE_LAG = "compensate_valve_lag"
 

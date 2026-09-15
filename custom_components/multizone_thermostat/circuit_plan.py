@@ -347,8 +347,14 @@ class CircuitPlanBuilder:
         room_ids: list[str],
         open_s: float,
         gap_s: float,
+        *,
+        toggle_circuit: bool = True,
     ) -> CircuitPlan:
-        """Sequential flush slots. Duration follows the last close."""
+        """Sequential flush slots. Duration follows the last close.
+
+        toggle_circuit True: open the circuit entity for the flush (default).
+        False: rooms flush, circuit slot stays closed — heat/cool demand only.
+        """
         rooms: list[ValveSlot] = []
         t = epoch
         last_close = epoch
@@ -368,7 +374,12 @@ class CircuitPlanBuilder:
             last_close = max(last_close, close_at)
             t = close_at
         duration = max(last_close - epoch, 0.0)
-        if self._circuit_entity_id and rooms and not rooms[0].is_closed:
+        if (
+            toggle_circuit
+            and self._circuit_entity_id
+            and rooms
+            and not rooms[0].is_closed
+        ):
             circuit_open = epoch + self._valve_lag
             circuit = ValveSlot(
                 entity_id=self._circuit_id,

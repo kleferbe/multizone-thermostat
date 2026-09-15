@@ -61,6 +61,7 @@ from .const import (
     CONF_PASSIVE_SWITCH_DURATION,
     CONF_PASSIVE_SWITCH_GAP,
     CONF_PASSIVE_SWITCH_OPEN_TIME,
+    CONF_PASSIVE_SWITCH_TOGGLES_ENTITY,
     CONF_PWM_DURATION,
     CONF_PWM_RESOLUTION,
     CONF_PWM_SCALE,
@@ -77,6 +78,7 @@ from .const import (
     DEFAULT_PASSIVE_SWITCH,
     DEFAULT_PASSIVE_SWITCH_GAP,
     DEFAULT_PASSIVE_SWITCH_OPEN_TIME,
+    DEFAULT_PASSIVE_SWITCH_TOGGLES_ENTITY,
     DEFAULT_CIRCUIT_PWM,
     DEFAULT_PWM_RESOLUTION,
     DEFAULT_PWM_SCALE,
@@ -164,6 +166,10 @@ PLATFORM_SCHEMA = vol.All(
             vol.Optional(
                 CONF_PASSIVE_SWITCH_GAP, default=DEFAULT_PASSIVE_SWITCH_GAP
             ): cv.time_period,
+            vol.Optional(
+                CONF_PASSIVE_SWITCH_TOGGLES_ENTITY,
+                default=DEFAULT_PASSIVE_SWITCH_TOGGLES_ENTITY,
+            ): cv.boolean,
         }
     ),
     validate_stuck_time(),
@@ -231,6 +237,9 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         self._passive_duration = config.get(CONF_PASSIVE_SWITCH_DURATION)
         self._passive_open_time = config[CONF_PASSIVE_SWITCH_OPEN_TIME]
         self._passive_gap = config[CONF_PASSIVE_SWITCH_GAP]
+        self._passive_switch_toggles_entity = config[
+            CONF_PASSIVE_SWITCH_TOGGLES_ENTITY
+        ]
 
         self._logger = logging.getLogger(DOMAIN).getChild(self._attr_name)
         self._registry_id: str | None = None
@@ -430,7 +439,12 @@ class CircuitSelect(SelectEntity, RestoreEntity):
             gap_s = self._passive_gap.total_seconds() if self._passive_gap else 0.0
             self._logger.info("stuck-loop plan for %s", stale)
             return self._plan_builder.build_stuck_loop(
-                epoch, hvac_mode, stale, open_s, gap_s
+                epoch,
+                hvac_mode,
+                stale,
+                open_s,
+                gap_s,
+                toggle_circuit=self._passive_switch_toggles_entity,
             )
 
         if self.is_standby:
@@ -595,6 +609,11 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         self._logger.info("stuck-loop plan for %s (force=%s)", room_ids, force)
         await self._apply_window(
             self._plan_builder.build_stuck_loop(
-                time.time(), self.circuit_hvac_mode, room_ids, open_s, gap_s
+                time.time(),
+                self.circuit_hvac_mode,
+                room_ids,
+                open_s,
+                gap_s,
+                toggle_circuit=self._passive_switch_toggles_entity,
             )
         )
