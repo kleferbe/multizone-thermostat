@@ -587,10 +587,15 @@ class HVACSetting:
     ) -> None:
         """Restore attributes after restart."""
         self._store_integral = restore_integral
-        self.target_temperature = data[ATTR_TEMPERATURE]
-        self.switch_last_change = datetime.datetime.strptime(
-            data[ATTR_LAST_SWITCH_CHANGE], "%Y-%m-%dT%H:%M:%S.%f%z"
-        )
+        if data.get(ATTR_TEMPERATURE) is not None:
+            self.target_temperature = data[ATTR_TEMPERATURE]
+        last = data.get(ATTR_LAST_SWITCH_CHANGE)
+        if isinstance(last, datetime.datetime):
+            self.switch_last_change = last
+        elif isinstance(last, str) and last:
+            self.switch_last_change = datetime.datetime.fromisoformat(
+                last.replace("Z", "+00:00")
+            )
         if self.is_pid:
             if restore_parameters and "PID_values" in data:
                 kp, ki, kd = data["PID_values"]

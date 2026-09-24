@@ -493,7 +493,11 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
 
         try:
             old_hvac_mode = old_state.state
-            old_preset_mode = old_state.attributes.get(ATTR_PRESET_MODE, PRESET_NONE)
+            try:
+                old_hvac_mode = HVACMode(old_hvac_mode) if old_hvac_mode else None
+            except ValueError:
+                old_hvac_mode = None
+            old_preset_mode = old_state.attributes.get(ATTR_PRESET_MODE) or PRESET_NONE
             old_temperature = old_state.attributes.get(ATTR_TEMPERATURE)
             self._logger.debug(
                 "Old state preset mode %s, hvac mode %s, temperature set point '%s'",
@@ -502,36 +506,57 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 old_temperature,
             )
 
-            # check if old state can be restored
-            if (
-                old_hvac_mode is None
-                or old_hvac_mode not in self.hvac_modes
-                or old_preset_mode not in self.preset_modes
-                or ATTR_HVAC_DEFINITION not in old_state.attributes
-            ):
-                raise ValueError(
-                    f"Invalid old hvac def '{old_hvac_mode}', start in off mode"
+            if old_hvac_mode is None or old_hvac_mode not in self.hvac_modes:
+                raise ValueError(f"hvac mode '{old_state.state}' is not enabled")
+            if old_preset_mode not in self.valid_presets(old_hvac_mode):
+                self._logger.warning(
+                    "preset '%s' is not enabled; restoring as '%s'",
+                    old_preset_mode,
+                    PRESET_NONE,
                 )
+                old_preset_mode = PRESET_NONE
 
             self._logger.info("restore old controller settings")
             self._hvac_mode_init = old_hvac_mode
             self._preset_mode = old_preset_mode
-            self.restore_controller_state(old_state)
+            if ATTR_HVAC_DEFINITION in old_state.attributes:
+                self.restore_controller_state(old_state)
+            else:
+                self._logger.warning(
+                    "no hvac_def in last state; mode and setpoint only"
+                )
+                if (
+                    old_hvac_mode != HVACMode.OFF
+                    and old_temperature is not None
+                    and old_hvac_mode in self._hvac_settings
+                ):
+                    self._hvac_settings[old_hvac_mode].target_temperature = (
+                        old_temperature
+                    )
 
         except Exception as e:
-            self._hvac_mode_init = HVACMode.OFF
             self._logger.warning("restoring old state failed:%s", str(e))
             self._logger.debug(traceback.format_exc())
+            if not self._hvac_mode_init:
+                self._hvac_mode_init = HVACMode.OFF
             return
 
     def restore_controller_state(self, old_state) -> None:
         """Restore HVAC settings from HA state."""
         old_def = old_state.attributes[ATTR_HVAC_DEFINITION]
         old_hvac_mode = old_state.state
+        try:
+            old_hvac_mode = HVACMode(old_hvac_mode) if old_hvac_mode else None
+        except ValueError:
+            old_hvac_mode = None
         old_temperature = old_state.attributes.get(ATTR_TEMPERATURE)
         for key, data in old_def.items():
-            if key in self._hvac_settings:
-                self._hvac_settings[key].restore_reboot(
+            try:
+                mode = HVACMode(key)
+            except ValueError:
+                continue
+            if mode in self._hvac_settings and isinstance(data, dict):
+                self._hvac_settings[mode].restore_reboot(
                     data,
                     self._restore_parameters,
                     self._restore_integral,
@@ -1337,8 +1362,8 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             return
 
         if not self._active_hvac_setting:
-            self._logger.warning(
-                "Control update should not be activate when hvac  mode is 'off', exit routine"
+            self._logger.debug(
+                "Control update skipped: hvac mode is '%s'", self._hvac_mode
             )
             return
 
