@@ -702,8 +702,6 @@ class Nesting:
             if len_pwm == NESTING_MATRIX:
                 rooms = list(dict.fromkeys(lid[:, -1]))
                 rooms = [r_i for r_i in rooms if r_i is not None]
-                if not rooms:
-                    continue
                 for room in rooms:
                     self.cleaned_rooms[len_pwm - 1].append(room)
                     if room not in self.offset:
