@@ -207,6 +207,7 @@ class PIDController:
         """Set integral."""
         self._logger.info("Forcing new integral: %s", integral)
         self._integral = integral / self._Ki
+        self.i_var = integral
 
     @property
     def differential(self) -> float:

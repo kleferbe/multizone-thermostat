@@ -595,8 +595,10 @@ class HVACSetting:
             if restore_parameters and "PID_values" in data:
                 kp, ki, kd = data["PID_values"]
                 self.set_pid_param(kp=kp, ki=ki, kd=kd, update=True)
-            if restore_integral and "PID_integral" in data:
-                self.integral = data["PID_integral"]
+            if restore_integral:
+                restored_i = data.get("PID_I", data.get("PID_integral"))
+                if restored_i is not None:
+                    self.integral = restored_i
             self.pid_reset_time()
 
 

@@ -265,6 +265,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         self._local_epoch_timer = None
         self._pid_tick_timers: list = []
         self._circuit_plan: CircuitPlan | None = None
+        self._startup_complete = False
 
         self._attr_name = name
 
@@ -461,6 +462,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 self._master_missing_logged = True
 
             await self.async_set_hvac_mode(self._hvac_mode_init)
+            self._startup_complete = True
             if save_state:
                 self.async_write_ha_state()
 
@@ -769,6 +771,9 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             elif self._active_hvac_setting.is_proportional:
                 if self._owns_epoch_loop():
                     self.start_room_control()
+
+            if not self.is_idle:
+                await self._async_compute_demand()
 
             self.async_write_ha_state()
 
@@ -1204,7 +1209,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                         self._async_switch_turn_off(hvac_mode=other_mode)
                     )
 
-            else:
+            elif self._startup_complete:
                 # not a current active thermostat thus switch state change should not be triggered
                 # unless stuck loop prevention is running
                 for hvac_mode, data in self._hvac_settings.items():
