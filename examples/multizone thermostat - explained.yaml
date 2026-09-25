@@ -334,7 +334,7 @@ climate:
         PID_mode:
           kp: 35
           ki: 0.004
-          kd: -250000
+          kd: 250000
 
           # check for sudden temperature drop, for instance by open window
           # -3.6 degrees celcius per hour is good start point
@@ -402,7 +402,7 @@ climate:
         PID_mode:
           kp: 35
           ki: 0.0004
-          kd: -250000
+          kd: 250000
 
           # check for sudden temperature drop, for instance by open window
           # -3.6 degrees celcius per hour is good start point
@@ -475,7 +475,7 @@ climate:
         PID_mode:
           kp: 25
           ki: 0.0004
-          kd: -250000
+          kd: 250000
 
           # check for sudden temperature drop, for instance by open window
           # -3.6 degrees celcius per hour is good start point
@@ -548,7 +548,7 @@ climate:
         PID_mode:
           kp: 35
           ki: 0.0004
-          kd: -250000
+          kd: 250000
 
           # check for sudden temperature drop, for instance by open window
           # -3.6 degrees celcius per hour is good start point
@@ -625,7 +625,7 @@ climate:
         PID_mode:
           kp: 2
           ki: 0.0003
-          kd: -30000
+          kd: 30000
           window_open_tempdrop: -3.6
 
         # example of room with slightly more heat loss than pid2
@@ -700,7 +700,7 @@ climate:
         PID_mode:
           kp: 20
           ki: 0.001
-          kd: -100000
+          kd: 100000
           window_open_tempdrop: -3.6
 
         # example of room with slightly more heat loss than pid2

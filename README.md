@@ -47,13 +47,13 @@ slow low temperature underfloor heating:
   PID_mode:
     kp: 30
     ki: 0.005
-    kd: -24000
+    kd: 24000
 
 high temperature radiator:
   PID_mode:
     kp: 80
     ki: 0.09
-    kd: -5000
+    kd: 5000
 
 * underfloor heating parameter optimisation: https://www.google.nl/url?sa=t&rct=j&q=&esrc=s&source=web&cd=&cad=rja&uact=8&ved=2ahUKEwi5htyg5_buAhXeQxUIHaZHB5QQFjAAegQIBBAD&url=https%3A%2F%2Fwww.mdpi.com%2F1996-1073%2F13%2F8%2F2068%2Fhtml&usg=AOvVaw3CukGrgPjpIO2eKM619BIn
 
@@ -170,11 +170,10 @@ If no PWM interval is defined, it will set the state of "heater" from 0 to "PWM_
 
 ##### PID controller (Optional) (sub of proportional mode)
 PID controller. Configured under 'PID_mode:'
-error = setpoint - room temp 
-output = error * Kp + sum(error * dT) * Ki + error / dT * Kd
+error = setpoint - room temp
+output = error * Kp + sum(error * dt) * Ki − (dT/dt) * Kd
 
-heat mode: Kp & Ki positive, Kd negative
-cool mode: Kp & Ki negative, Kd positive
+kd is per °C/s (not per control_interval). Heat: Kp, Ki, Kd positive. Cool: all three negative.
 
 with the data (as sub):
 * kp (Required): Set PID parameter, p control value.

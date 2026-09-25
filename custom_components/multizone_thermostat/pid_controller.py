@@ -104,7 +104,9 @@ class PIDController:
         self.calc_integral(error, time_diff)
         self.p_var = self._Kp * error
         self.i_var = self._Ki * self._integral
-        self.d_var = self._Kd * self._differential
+        # Derivative on measurement, per °C/s (independent of control_interval).
+        # Heating (kd > 0): rising T reduces output. Cooling (kd < 0) flips with the gain.
+        self.d_var = -self._Kd * self._differential
 
         # Compute PID Output
         self._last_output = self.p_var + self.i_var + self.d_var
