@@ -29,7 +29,6 @@ from homeassistant.components.climate import (
     HVACMode,
 )
 from homeassistant.const import (
-    ATTR_CURRENT_TEMPERATURE,
     ATTR_ENTITY_ID,
     ATTR_TEMPERATURE,
     CONF_NAME,
@@ -1879,7 +1878,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         if self._kf_temp:
             temp = self.room_current_temperature
             if temp is not None:
-                data[ATTR_CURRENT_TEMPERATURE] = round(float(temp), 2)
+                data["current_temperature"] = round(float(temp), 2)
         return data
 
     @property
