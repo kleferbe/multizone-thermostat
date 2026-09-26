@@ -77,6 +77,7 @@ from .const import (
     ATTR_CURRENT_TEMP_VEL,
     ATTR_EMERGENCY_MODE,
     ATTR_FILTER_MODE,
+    ATTR_FILTER_RESOLUTION,
     ATTR_HVAC_DEFINITION,
     ATTR_STUCK_LOOP,
     ATTR_VALUE,
@@ -87,6 +88,7 @@ from .const import (
     CONF_ENABLE_OLD_STATE,
     CONF_EXTRA_PRESETS,
     CONF_FILTER_MODE,
+    CONF_FILTER_RESOLUTION,
     CONF_INITIAL_HVAC_MODE,
     CONF_INITIAL_PRESET_MODE,
     CONF_MASTER,
@@ -133,6 +135,7 @@ async def async_setup_platform(
     name = config.get(CONF_NAME)
     sensor_entity_id = config.get(CONF_SENSOR)
     filter_mode = config.get(CONF_FILTER_MODE)
+    filter_resolution = config.get(CONF_FILTER_RESOLUTION)
     sensor_out_entity_id = config.get(CONF_SENSOR_OUT)
     initial_hvac_mode = config.get(CONF_INITIAL_HVAC_MODE)
     precision = config.get(CONF_PRECISION)
@@ -175,6 +178,7 @@ async def async_setup_platform(
                 area,
                 sensor_entity_id,
                 filter_mode,
+                filter_resolution,
                 sensor_out_entity_id,
                 hvac_def,
                 enabled_hvac_modes,
@@ -213,6 +217,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         area,
         sensor_entity_id,
         filter_mode,
+        filter_resolution,
         sensor_out_entity_id,
         hvac_def,
         enabled_hvac_modes,
@@ -233,6 +238,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         self._sensor_entity_id = sensor_entity_id
         self._sensor_out_entity_id = sensor_out_entity_id
         self._filter_mode = filter_mode
+        self._filter_resolution = filter_resolution
         self._kf_temp = None
         self._temp_precision = precision
         self._attr_temperature_unit = unit
@@ -587,6 +593,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             ATTR_CURRENT_TEMP_VEL: self.current_temperature_velocity,
             ATTR_CURRENT_OUTDOOR_TEMPERATURE: self.outdoor_temperature,
             ATTR_FILTER_MODE: self.filter_mode,
+            ATTR_FILTER_RESOLUTION: self._filter_resolution,
             CONF_AREA: self._area,
         }
         if self._circuit_plan is not None:
@@ -655,6 +662,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                         self._current_temperature,
                         cycle_time,
                         self.filter_mode,
+                        self._filter_resolution,
                     )
                 else:
                     self._logger.info(
@@ -1267,25 +1275,19 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             if not self._kf_temp and self.filter_mode > 0:
                 self.set_filter_mode(self.filter_mode)
 
-        # update ukf filter
+        # Predict with elapsed dt; update only on a new measurement (not the stale last T).
         if self._kf_temp:
             self._kf_temp.kf_predict()
             if current_temp:
-                tmp_temperature = float(current_temp)
-            elif self._current_temperature is not None:
-                tmp_temperature = self._current_temperature
-            else:
-                tmp_temperature = None
-
-            if tmp_temperature:
-                self._kf_temp.kf_update(tmp_temperature)
-
+                self._kf_temp.kf_update(float(current_temp))
             self._logger.debug(
-                "filtered sensor update temp '%.2f'", self._kf_temp.get_temp
+                "filtered temp '%.3f' vel %.5f °C/s",
+                self._kf_temp.get_temp,
+                self._kf_temp.get_vel,
             )
 
-        # PID/PWM windows sample on their own ticks; on-off waits for the next plan.
-        if current_temp:
+        # Sensor snaps and (via PID tick) predicted Ist both go to HA history.
+        if current_temp or self._kf_temp:
             self.async_write_ha_state()
 
     @callback
@@ -1300,16 +1302,17 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 self._active_hvac_setting.outdoor_temperature = self._outdoor_temperature
 
     async def _async_update_controller_temp(self) -> None:
-        """Update temperature to controller routines."""
-        # TODO: async needed?
-        if self._active_hvac_setting:
-            if not self._kf_temp:
-                self._active_hvac_setting.current_temperature = self._current_temperature
-            else:
-                self._active_hvac_setting.current_state = [
-                    self._kf_temp.get_temp,
-                    self._kf_temp.get_vel,
-                ]
+        """Push current (predicted) room temp into the active HVAC setting."""
+        if not self._active_hvac_setting:
+            return
+        if self._kf_temp:
+            self._kf_temp.kf_predict()
+            self._active_hvac_setting.current_state = [
+                self._kf_temp.get_temp,
+                self._kf_temp.get_vel,
+            ]
+        else:
+            self._active_hvac_setting.current_temperature = self._current_temperature
 
     async def _async_check_duration(self, routine: bool, force: bool) -> bool:
         """Check if switch change in on-off mode has been long enough.

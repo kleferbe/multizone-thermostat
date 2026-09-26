@@ -94,6 +94,7 @@ The thermostat can be configured for a wide variation of hardware specifications
 sensors (at least one sensor needs to be specified):
 * sensor (Optional): entity_id of the temperature sensor, sensor.state must be temperature (float). Not required when running in weather compensation only.
 * filter_mode (Optional): unscented kalman filter can be used to smoothen the temperature sensor readings. Especially usefull in case of irregular sensor updates such as battery operated devices (for instance battery operated zigbee sensor). Default = 0 (off) (see section 'sensor filter' for more details)
+* filter_resolution (Optional): sensor step in Kelvin, from the datasheet or HA history stairs (e.g. 0.2 or 0.5). Used as UKF measurement noise. Default = 0.2
 * sensor_out (Optional): entity_id for a outdoor temperature sensor, sensor_out.state must be temperature (float). Only required when running weather mode. No filtering possible.
 
 * initial_hvac_mode (Optional): Set the initial operation mode. Valid values are 'off', 'cool' or 'heat'. Default = off
@@ -256,6 +257,10 @@ An unscented kalman filter is present to smoothen the temperature readings in ca
 The filter intesity is defined by a factor between 0 to 5 (integer).
 0 = no filter
 5 = max smoothing
+
+`filter_resolution` is the sensor step in K (datasheet or the stair height in HA history). Default 0.2. A 0.5 K Zigbee sensor should set `0.5`; a fine wired sensor can use `0.1` or `0.01`. `filter_mode` still scales how strongly that noise is trusted.
+
+State is `[T, dT/dt]`. Between sensor reports the filter predicts forward; climate `current_temperature` is that estimate. It is written on sensor updates and on each PID `control_interval` tick (so the history can ramp instead of following sensor stairs). Higher `filter_mode` trusts the sensor less (smoother, more lag). Start at 1.
 
 # DEBUGGING:
 debugging is possible by enabling logger in configuration with following configuration

@@ -11,6 +11,7 @@ DEFAULT_MAX_TEMP_COOL = 40
 DEFAULT_MIN_TEMP_COOL = 15
 DEFAULT_DETAILED_OUTPUT = False
 DEFAULT_SENSOR_FILTER = 0
+DEFAULT_FILTER_RESOLUTION = 0.2
 DEFAULT_AREA = 0
 DEFAULT_INCLUDE_VALVE_LAG = timedelta(seconds=0)
 
@@ -55,12 +56,14 @@ CONF_DETAILED_OUTPUT = "detailed_output"
 
 CONF_SENSOR = "sensor"
 CONF_FILTER_MODE = "filter_mode"
+CONF_FILTER_RESOLUTION = "filter_resolution"
 
 ATTR_HVAC_DEFINITION = "hvac_def"
 ATTR_CONTROL_MODE = "control_mode"
 ATTR_CURRENT_TEMP_VEL = "current_temperature_velocity"
 ATTR_CURRENT_OUTDOOR_TEMPERATURE = "current_outdoor_temp"
 ATTR_FILTER_MODE = "filter_mode"
+ATTR_FILTER_RESOLUTION = "filter_resolution"
 ATTR_DETAILED_OUTPUT = "detailed_output"
 ATTR_EMERGENCY_MODE = "emergency mode"
 ATTR_LAST_SWITCH_CHANGE = "switch_last_change"

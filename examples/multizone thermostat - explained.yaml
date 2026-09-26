@@ -271,6 +271,8 @@ climate:
     # average and smoothen the output. this improves the derative term for the pid controller
     # advised to start with filter_mode 1
     filter_mode: 1
+    # sensor step from datasheet or HA history stairs (0.2 / 0.5 typical for Zigbee)
+    filter_resolution: 0.2
 
     # activate emergency mode (pause thermostat operation) when sensor did not provide update
     sensor_stale_duration:

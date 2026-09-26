@@ -24,6 +24,7 @@ from .const import (
     CONF_ENABLE_OLD_STATE,
     CONF_EXTRA_PRESETS,
     CONF_FILTER_MODE,
+    CONF_FILTER_RESOLUTION,
     CONF_HYSTERESIS_TOLERANCE_OFF,
     CONF_HYSTERESIS_TOLERANCE_ON,
     CONF_INITIAL_HVAC_MODE,
@@ -62,6 +63,7 @@ from .const import (
     CONF_WINDOW_OPEN_TEMPDROP,
     DEFAULT_AREA,
     DEFAULT_DETAILED_OUTPUT,
+    DEFAULT_FILTER_RESOLUTION,
     DEFAULT_MASTER_SCALE_BOUND,
     DEFAULT_MAX_TEMP_COOL,
     DEFAULT_MAX_TEMP_HEAT,
@@ -221,6 +223,9 @@ PLATFORM_SCHEMA = vol.All(
             vol.Optional(CONF_FILTER_MODE, default=DEFAULT_SENSOR_FILTER): vol.Coerce(
                 int
             ),
+            vol.Optional(
+                CONF_FILTER_RESOLUTION, default=DEFAULT_FILTER_RESOLUTION
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.01, max=2)),
             vol.Optional(CONF_SENSOR_OUT): cv.entity_id,
             vol.Optional(CONF_INITIAL_HVAC_MODE, default=HVACMode.OFF): vol.In(
                 SUPPORTED_HVAC_MODES
