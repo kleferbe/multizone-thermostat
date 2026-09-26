@@ -34,7 +34,8 @@ class UKFFilter:
         self._kf_temp = UnscentedKalmanFilter(
             dim_x=2, dim_z=1, dt=self._interval, hx=hx, fx=fx, points=sigmas
         )
-        self._kf_temp.x = np.array([float(current_temp), 0.0])
+        self._last_z = float(current_temp)
+        self._kf_temp.x = np.array([self._last_z, 0.0])
         self._kf_temp.P = np.diag([self._resolution**2, _VEL_PRIOR**2])
         self.set_Q_R(self._interval)
 
@@ -53,10 +54,27 @@ class UKFFilter:
         vel = float(self._kf_temp.x[1])
         if abs(vel) > _MAX_ABS_VEL:
             self._kf_temp.x[1] = np.copysign(_MAX_ABS_VEL, vel)
+        self._apply_report_deadband()
 
     def kf_update(self, current_temp):
         """run UKF update"""
         self._kf_temp.update(float(current_temp))
+        self._last_z = float(current_temp)
+
+    def _apply_report_deadband(self):
+        """No report means the sensor has not left ±resolution of the last one.
+
+        Report-on-change (Zigbee) is not a missing sample. Silence is the
+        measurement: predicted T stays inside the last step. Velocity is kept,
+        so a later confirming step can continue the same slope.
+        """
+        if self._last_z is None:
+            return
+        lo = self._last_z - self._resolution
+        hi = self._last_z + self._resolution
+        temp = float(self._kf_temp.x[0])
+        if temp < lo or temp > hi:
+            self._kf_temp.x[0] = min(max(temp, lo), hi)
 
     @property
     def get_temp(self):

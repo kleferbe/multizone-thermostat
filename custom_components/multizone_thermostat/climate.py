@@ -29,6 +29,7 @@ from homeassistant.components.climate import (
     HVACMode,
 )
 from homeassistant.const import (
+    ATTR_CURRENT_TEMPERATURE,
     ATTR_ENTITY_ID,
     ATTR_TEMPERATURE,
     CONF_NAME,
@@ -1866,6 +1867,20 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
     def max_temp(self) -> float:
         """Return the maximum temperature."""
         return self.room_max_temp
+
+    @property
+    def state_attributes(self) -> dict:
+        """HA climate show_temp only rounds to 0.5 / 0.1 / 1.
+
+        That turns a UKF ramp into 0.1 K stairs in history. Keep the
+        setpoint rounding, publish filtered current temp at 0.01 K.
+        """
+        data = super().state_attributes
+        if self._kf_temp:
+            temp = self.room_current_temperature
+            if temp is not None:
+                data[ATTR_CURRENT_TEMPERATURE] = round(float(temp), 2)
+        return data
 
     @property
     def current_temperature(self) -> float | None:
