@@ -17,8 +17,10 @@ _MAX_DT = 3600.0
 _MAX_ABS_VEL = 10.0 / 3600.0
 # White-noise acceleration (°C/s²): ~1 °C/h change over 15 min at mode 1.
 _ACCEL_SIGMA = 3.0e-7
-# Velocity mean-reverts so a Zigbee report-on-change plateau does not coast forever.
-_VEL_TAU = 3600.0
+# Critically damped return toward the last report. 2 h is long enough that a
+# rise confirmed about once an hour keeps most of its slope, and short enough
+# that a silent hold bends back before the estimate sits 0.2 K too high.
+_RETURN_TAU = 2 * 3600.0
 
 
 class UKFFilter:
@@ -31,10 +33,15 @@ class UKFFilter:
         self._resolution = float(resolution)
         self._interval = max(float(timedelta or 1.0), 1.0)
         sigmas = MerweScaledSigmaPoints(n=2, alpha=0.001, beta=2, kappa=0)
-        self._kf_temp = UnscentedKalmanFilter(
-            dim_x=2, dim_z=1, dt=self._interval, hx=hx, fx=fx, points=sigmas
-        )
         self._last_z = float(current_temp)
+        self._kf_temp = UnscentedKalmanFilter(
+            dim_x=2,
+            dim_z=1,
+            dt=self._interval,
+            hx=hx,
+            fx=self._transition,
+            points=sigmas,
+        )
         self._kf_temp.x = np.array([self._last_z, 0.0])
         self._kf_temp.P = np.diag([self._resolution**2, _VEL_PRIOR**2])
         self.set_Q_R(self._interval)
@@ -62,11 +69,10 @@ class UKFFilter:
         self._last_z = float(current_temp)
 
     def _apply_report_deadband(self):
-        """No report means the sensor has not left ±resolution of the last one.
+        """Do not predict more than one sensor step past the last report.
 
-        Report-on-change (Zigbee) is not a missing sample. Silence is the
-        measurement: predicted T stays inside the last step. Velocity is kept,
-        so a later confirming step can continue the same slope.
+        The return dynamics pull T back inside. The clamp only stops a claim
+        that the next step already happened.
         """
         if self._last_z is None:
             return
@@ -75,6 +81,26 @@ class UKFFilter:
         temp = float(self._kf_temp.x[0])
         if temp < lo or temp > hi:
             self._kf_temp.x[0] = min(max(temp, lo), hi)
+
+    def _transition(self, x, dt):  # pylint: disable=invalid-name
+        """Inertial turn back toward the last report.
+
+        Critical damping pulls temperature to the last measurement and
+        velocity to zero, without swinging past it. A new report moves the
+        target, so a rise that is confirmed every hour barely feels the turn.
+        """
+        tau = _RETURN_TAU
+        w = 1.0 / tau
+        z = self._last_z
+        e0 = float(x[0]) - z
+        v0 = float(x[1])
+        decay = np.exp(-w * dt)
+        along = v0 + w * e0
+        e = decay * (e0 + along * dt)
+        v = decay * (v0 - w * along * dt)
+        if abs(v) > _MAX_ABS_VEL:
+            v = float(np.copysign(_MAX_ABS_VEL, v))
+        return np.array([z + e, v])
 
     @property
     def get_temp(self):
@@ -117,14 +143,6 @@ class UKFFilter:
         if val != self._mode:
             self._mode = val
             self.set_Q_R(timedelta=timedelta)
-
-
-def fx(x, dt):  # pylint: disable=invalid-name
-    """Constant-velocity with damped v: T coasts, v → 0 over _VEL_TAU."""
-    decay = np.exp(-dt / _VEL_TAU)
-    vel = float(x[1])
-    dT = vel * _VEL_TAU * (1.0 - decay)
-    return np.array([float(x[0]) + dT, vel * decay])
 
 
 def hx(x):  # pylint: disable=invalid-name

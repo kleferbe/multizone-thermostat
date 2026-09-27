@@ -258,7 +258,7 @@ The filter intesity is defined by a factor between 0 to 5 (integer).
 0 = no filter
 5 = max smoothing
 
-`filter_resolution` is the sensor step in K (datasheet or the stair height in HA history). Default 0.2. A 0.5 K Zigbee sensor should set `0.5`; a fine wired sensor can use `0.1` or `0.01`. `filter_mode` still scales how strongly that noise is trusted. Report-on-change sensors: between reports the prediction is not allowed to leave ±`filter_resolution` of the last value, because a larger move would have been sent.
+`filter_resolution` is the sensor step in K (datasheet or the stair height in HA history). Default 0.2. A 0.5 K Zigbee sensor should set `0.5`; a fine wired sensor can use `0.1` or `0.01`. `filter_mode` still scales how strongly that noise is trusted. Between reports the estimate coasts with inertia and, if no new value arrives, curves back toward the last report over about two hours. It is not predicted more than one `filter_resolution` past that report.
 
 State is `[T, dT/dt]`. Between sensor reports the filter predicts forward; climate `current_temperature` is that estimate. It is written on sensor updates and on each PID `control_interval` tick (so the history can ramp instead of following sensor stairs). Higher `filter_mode` trusts the sensor less (smoother, more lag). Start at 1.
 
