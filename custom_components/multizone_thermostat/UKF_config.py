@@ -17,10 +17,6 @@ _MAX_DT = 3600.0
 _MAX_ABS_VEL = 10.0 / 3600.0
 # White-noise acceleration (°C/s²): ~1 °C/h change over 15 min at mode 1.
 _ACCEL_SIGMA = 3.0e-7
-# Critically damped return toward the last report. 2 h is long enough that a
-# rise confirmed about once an hour keeps most of its slope, and short enough
-# that a silent hold bends back before the estimate sits 0.2 K too high.
-_RETURN_TAU = 2 * 3600.0
 
 
 class UKFFilter:
@@ -39,7 +35,7 @@ class UKFFilter:
             dim_z=1,
             dt=self._interval,
             hx=hx,
-            fx=self._transition,
+            fx=fx,
             points=sigmas,
         )
         self._kf_temp.x = np.array([self._last_z, 0.0])
@@ -69,10 +65,11 @@ class UKFFilter:
         self._last_z = float(current_temp)
 
     def _apply_report_deadband(self):
-        """Do not predict more than one sensor step past the last report.
+        """Keep the prediction inside ±resolution of the last report.
 
-        The return dynamics pull T back inside. The clamp only stops a claim
-        that the next step already happened.
+        Report-on-change: no message means the temperature has not left that
+        band. Velocity is kept. A later report, including a repeated value,
+        is a normal update and pulls the estimate back if the coast was wrong.
         """
         if self._last_z is None:
             return
@@ -81,26 +78,6 @@ class UKFFilter:
         temp = float(self._kf_temp.x[0])
         if temp < lo or temp > hi:
             self._kf_temp.x[0] = min(max(temp, lo), hi)
-
-    def _transition(self, x, dt):  # pylint: disable=invalid-name
-        """Inertial turn back toward the last report.
-
-        Critical damping pulls temperature to the last measurement and
-        velocity to zero, without swinging past it. A new report moves the
-        target, so a rise that is confirmed every hour barely feels the turn.
-        """
-        tau = _RETURN_TAU
-        w = 1.0 / tau
-        z = self._last_z
-        e0 = float(x[0]) - z
-        v0 = float(x[1])
-        decay = np.exp(-w * dt)
-        along = v0 + w * e0
-        e = decay * (e0 + along * dt)
-        v = decay * (v0 - w * along * dt)
-        if abs(v) > _MAX_ABS_VEL:
-            v = float(np.copysign(_MAX_ABS_VEL, v))
-        return np.array([z + e, v])
 
     @property
     def get_temp(self):
@@ -143,6 +120,12 @@ class UKFFilter:
         if val != self._mode:
             self._mode = val
             self.set_Q_R(timedelta=timedelta)
+
+
+def fx(x, dt):  # pylint: disable=invalid-name
+    """Constant velocity. The report deadband limits position, not this slope."""
+    vel = float(x[1])
+    return np.array([float(x[0]) + vel * dt, vel])
 
 
 def hx(x):  # pylint: disable=invalid-name
