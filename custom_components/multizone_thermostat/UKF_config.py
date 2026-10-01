@@ -57,32 +57,25 @@ class UKFFilter:
         vel = float(self._kf_temp.x[1])
         if abs(vel) > _MAX_ABS_VEL:
             self._kf_temp.x[1] = np.copysign(_MAX_ABS_VEL, vel)
-        self._apply_report_deadband()
 
     def kf_update(self, current_temp):
         """run UKF update"""
         self._kf_temp.update(float(current_temp))
         self._last_z = float(current_temp)
 
-    def _apply_report_deadband(self):
-        """Keep the prediction inside ±resolution of the last report.
-
-        Report-on-change: no message means the temperature has not left that
-        band. Velocity is kept. A later report, including a repeated value,
-        is a normal update and pulls the estimate back if the coast was wrong.
-        """
-        if self._last_z is None:
-            return
-        lo = self._last_z - self._resolution
-        hi = self._last_z + self._resolution
-        temp = float(self._kf_temp.x[0])
-        if temp < lo or temp > hi:
-            self._kf_temp.x[0] = min(max(temp, lo), hi)
-
     @property
     def get_temp(self):
-        """return filtered temperature"""
-        return float(self._kf_temp.x[0])
+        """Filtered temperature, held inside ±resolution of the last report.
+
+        The filter state itself keeps coasting. Report-on-change only limits
+        what is published: silence means the room has not left that band, but
+        the next sample is compared with the full coast, so a wrong slope is
+        corrected independent of how wide the band is.
+        """
+        temp = float(self._kf_temp.x[0])
+        lo = self._last_z - self._resolution
+        hi = self._last_z + self._resolution
+        return min(max(temp, lo), hi)
 
     @property
     def get_vel(self):
@@ -123,7 +116,7 @@ class UKFFilter:
 
 
 def fx(x, dt):  # pylint: disable=invalid-name
-    """Constant velocity. The report deadband limits position, not this slope."""
+    """Constant velocity. The report band limits only the published temperature."""
     vel = float(x[1])
     return np.array([float(x[0]) + vel * dt, vel])
 
