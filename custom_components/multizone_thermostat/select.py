@@ -69,6 +69,7 @@ from .const import (
     CONF_SUPPORTED_MODES,
     CONF_SWITCH_MODE,
     CONTROL_START_DELAY,
+    REPLAN_DEBOUNCE,
     DEFAULT_INCLUDE_VALVE_LAG,
     DEFAULT_MIN_DIFF,
     DEFAULT_MIN_LOAD,
@@ -245,6 +246,7 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         self._registry_id: str | None = None
         self._area = 0.0
         self._epoch_timer = None
+        self._replan_timer = None
         self._pwm_start_timer = None
         self._pwm_stop_timer = None
         self._circuit_plan: CircuitPlan | None = None
@@ -339,6 +341,7 @@ class CircuitSelect(SelectEntity, RestoreEntity):
 
     async def async_will_remove_from_hass(self) -> None:
         self._clear_epoch_timer()
+        self._clear_replan_timer()
         self._clear_pwm_timers()
         async_get_registry(self.hass).unregister_circuit(self)
         await super().async_will_remove_from_hass()
@@ -370,6 +373,7 @@ class CircuitSelect(SelectEntity, RestoreEntity):
 
         if option == CircuitMode.UNCOORDINATED:
             self._clear_epoch_timer()
+            self._clear_replan_timer()
             self._clear_pwm_timers()
             await self._async_circuit_off()
             self._circuit_plan = None
@@ -409,6 +413,40 @@ class CircuitSelect(SelectEntity, RestoreEntity):
             return
         self._epoch_timer()
         self._epoch_timer = None
+
+    async def replan(self, *, debounce: bool = False) -> None:
+        """Rebuild this window. debounce resets until setpoint changes go quiet."""
+        if self.is_uncoordinated or self.anti_calc_active:
+            return
+        if not debounce:
+            self._clear_replan_timer()
+            await self._apply_window(await self._build_window(time.time()))
+            return
+        self._set_replan_timer(time.time() + REPLAN_DEBOUNCE)
+
+    def _set_replan_timer(self, when: float) -> None:
+        self._clear_replan_timer()
+
+        async def _fired(now: datetime.datetime | None = None) -> None:
+            self._replan_timer = None
+            await self._on_replan_timer(now)
+
+        self._replan_timer = async_track_point_in_utc_time(
+            self.hass,
+            _fired,
+            datetime.datetime.fromtimestamp(when),
+        )
+
+    def _clear_replan_timer(self) -> None:
+        if self._replan_timer is None:
+            return
+        self._replan_timer()
+        self._replan_timer = None
+
+    async def _on_replan_timer(self, now: datetime.datetime | None = None) -> None:
+        if self.is_uncoordinated or self.anti_calc_active:
+            return
+        await self._apply_window(await self._build_window(time.time()))
 
     async def _on_epoch_timer(self, now: datetime.datetime | None = None) -> None:
         if self.is_uncoordinated:
@@ -484,6 +522,7 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         return queue
 
     async def _apply_window(self, plan: CircuitPlan) -> None:
+        self._clear_replan_timer()
         self._circuit_plan = plan
         await self._apply_circuit_slot(plan)
         for sat in async_get_registry(self.hass).members(self.entity_id):

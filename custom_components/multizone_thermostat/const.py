@@ -175,6 +175,7 @@ class NestingMode(StrEnum):
 
 # control constants
 CONTROL_START_DELAY = 1  # seconds, first epoch after HVAC/circuit start
+REPLAN_DEBOUNCE = 30  # seconds, rebuild the PWM window after the last setpoint change
 PWM_UPDATE_CHANGE = 0.05  # percentage, pwm difference above which an update is needed
 MIN_MASTER_LOAD = 0.25  # min load for nesting
 NESTING_DOMINANCE = 0.75  # limit dominant room in nesting

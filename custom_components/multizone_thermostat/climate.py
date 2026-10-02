@@ -99,6 +99,7 @@ from .const import (
     CONF_SENSOR_OUT,
     CONF_STALE_DURATION,
     CONTROL_START_DELAY,
+    REPLAN_DEBOUNCE,
     NC_SWITCH_MODE,
     NO_SWITCH_MODE,
     PRESET_EMERGENCY,
@@ -269,6 +270,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         self._configured_master = master_entity_id
         self._master_missing_logged = False
         self._local_epoch_timer = None
+        self._replan_timer = None
         self._pid_tick_timers: list = []
         self._circuit_plan: CircuitPlan | None = None
         self._startup_complete = False
@@ -479,6 +481,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
 
     async def async_will_remove_from_hass(self) -> None:
         """Drop zone membership when the entity is unloaded."""
+        self._clear_replan_timer()
         async_get_registry(self.hass).unregister_climate(self)
         await super().async_will_remove_from_hass()
 
@@ -736,10 +739,14 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             )
             return
 
-        self._active_hvac_setting.target_temperature = round(temperature, 3)
+        temperature = round(float(temperature), 3)
+        changed = self._active_hvac_setting.target_temperature != temperature
+        self._active_hvac_setting.target_temperature = temperature
 
         if self._hvac_mode != HVACMode.OFF:
             await self.update_demand()
+            if changed:
+                await self.replan(debounce=True)
 
         self.async_write_ha_state()
 
@@ -819,6 +826,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
     def stop_local_epoch(self) -> None:
         """Cancel local epoch and in-window PID ticks. Valve timers stay."""
         self._clear_local_epoch_timer()
+        self._clear_replan_timer()
         self._clear_pid_tick_timers()
 
     def _set_local_epoch_timer(self, when: float) -> None:
@@ -839,6 +847,46 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             return
         self._local_epoch_timer()
         self._local_epoch_timer = None
+
+    async def replan(self, *, debounce: bool = False) -> None:
+        """Rebuild the plan after a setpoint change.
+
+        Coordinated rooms share the circuit timer. A room without a circuit
+        debounces locally. Demand is already current; this only schedules.
+        """
+        if self._hvac_mode == HVACMode.OFF or self.is_idle or self.anti_calc_active:
+            return
+        if self.is_coordinated:
+            await self.get_circuit().replan(debounce=debounce)
+            return
+        if not self._owns_epoch_loop():
+            return
+        if debounce:
+            self._set_replan_timer(time.time() + REPLAN_DEBOUNCE)
+            return
+        await self._apply_window(self._build_window(time.time()))
+
+    def _set_replan_timer(self, when: float) -> None:
+        self._clear_replan_timer()
+
+        async def _fired(now: datetime.datetime | None = None) -> None:
+            self._replan_timer = None
+            await self._on_replan_timer(now)
+
+        self._replan_timer = async_track_point_in_utc_time(
+            self.hass,
+            _fired,
+            datetime.datetime.fromtimestamp(when),
+        )
+
+    def _clear_replan_timer(self) -> None:
+        if self._replan_timer is None:
+            return
+        self._replan_timer()
+        self._replan_timer = None
+
+    async def _on_replan_timer(self, now: datetime.datetime | None = None) -> None:
+        await self._apply_window(self._build_window(time.time()))
 
     def _clear_pid_tick_timers(self) -> None:
         for unsub in self._pid_tick_timers:
@@ -964,6 +1012,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         return True
 
     async def _apply_window(self, plan: CircuitPlan) -> None:
+        self._clear_replan_timer()
         await self.apply_plan(plan)
         if self._owns_epoch_loop() and plan.duration > 0:
             self._set_local_epoch_timer(plan.window_end)
@@ -1733,6 +1782,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                     await self._apply_window(self._build_window(time.time()))
             elif self.preset_mode != PRESET_EMERGENCY:
                 await self.update_demand()
+                await self.replan(debounce=True)
 
         elif self._old_mode != HVACMode.OFF:
             self._logger.debug(
