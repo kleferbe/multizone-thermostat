@@ -46,6 +46,7 @@ DEFAULT_PWM_RESOLUTION = 50
 DEFAULT_MASTER_SCALE_BOUND = 1
 MIN_PWM_DURATION = timedelta(seconds=60)
 DEFAULT_CIRCUIT_PWM = timedelta(minutes=15)
+DEFAULT_MISSING_SENSOR_PWM = 0
 
 # configuration variables
 CONF_INITIAL_HVAC_MODE = "initial_hvac_mode"
@@ -55,6 +56,7 @@ CONF_PASSIVE_SWITCH_CHECK = "passive_switch_check"
 CONF_DETAILED_OUTPUT = "detailed_output"
 
 CONF_SENSOR = "sensor"
+CONF_MISSING_SENSOR_PWM = "missing_sensor_pwm"
 CONF_FILTER_MODE = "filter_mode"
 CONF_FILTER_RESOLUTION = "filter_resolution"
 

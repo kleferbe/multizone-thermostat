@@ -92,6 +92,7 @@ from .const import (
     CONF_INITIAL_HVAC_MODE,
     CONF_INITIAL_PRESET_MODE,
     CONF_MASTER,
+    CONF_MISSING_SENSOR_PWM,
     CONF_PASSIVE_CHECK_TIME,
     CONF_PASSIVE_SWITCH_CHECK,
     CONF_PRECISION,
@@ -135,6 +136,7 @@ async def async_setup_platform(
 
     name = config.get(CONF_NAME)
     sensor_entity_id = config.get(CONF_SENSOR)
+    missing_sensor_pwm = config[CONF_MISSING_SENSOR_PWM]
     filter_mode = config.get(CONF_FILTER_MODE)
     filter_resolution = config.get(CONF_FILTER_RESOLUTION)
     sensor_out_entity_id = config.get(CONF_SENSOR_OUT)
@@ -178,6 +180,7 @@ async def async_setup_platform(
                 precision,
                 area,
                 sensor_entity_id,
+                missing_sensor_pwm,
                 filter_mode,
                 filter_resolution,
                 sensor_out_entity_id,
@@ -217,6 +220,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         precision,
         area,
         sensor_entity_id,
+        missing_sensor_pwm,
         filter_mode,
         filter_resolution,
         sensor_out_entity_id,
@@ -237,6 +241,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         self._temp_lock = asyncio.Lock()
 
         self._sensor_entity_id = sensor_entity_id
+        self._missing_sensor_pwm = float(missing_sensor_pwm)
         self._sensor_out_entity_id = sensor_out_entity_id
         self._filter_mode = filter_mode
         self._filter_resolution = filter_resolution
@@ -1426,8 +1431,13 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             or self._active_hvac_setting.is_proportional
         ):
             if self._sensor_entity_id and self._active_hvac_setting.current_temperature is None:
+                self.control_output = {
+                    ATTR_CONTROL_OFFSET: 0,
+                    ATTR_CONTROL_PWM_OUTPUT: self._missing_sensor_pwm,
+                }
                 self._logger.debug(
-                    "cancel control loop: current temp is None while running controller routine."
+                    "Room sensor has no value, demand pwm %s",
+                    self._missing_sensor_pwm,
                 )
                 return
 

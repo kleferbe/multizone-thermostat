@@ -52,6 +52,7 @@ from .const import (
     CONF_PWM_SCALE_HIGH,
     CONF_PWM_SCALE_LOW,
     CONF_PWM_THRESHOLD,
+    CONF_MISSING_SENSOR_PWM,
     CONF_SENSOR,
     CONF_SENSOR_OUT,
     CONF_STALE_DURATION,
@@ -64,6 +65,7 @@ from .const import (
     DEFAULT_AREA,
     DEFAULT_DETAILED_OUTPUT,
     DEFAULT_FILTER_RESOLUTION,
+    DEFAULT_MISSING_SENSOR_PWM,
     DEFAULT_MASTER_SCALE_BOUND,
     DEFAULT_MAX_TEMP_COOL,
     DEFAULT_MAX_TEMP_HEAT,
@@ -220,6 +222,9 @@ PLATFORM_SCHEMA = vol.All(
             vol.Optional(CONF_UNIQUE_ID): cv.string,
             vol.Optional(CONF_MASTER): cv.entity_id,
             vol.Optional(CONF_SENSOR): cv.entity_id,
+            vol.Optional(
+                CONF_MISSING_SENSOR_PWM, default=DEFAULT_MISSING_SENSOR_PWM
+            ): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
             vol.Optional(CONF_FILTER_MODE, default=DEFAULT_SENSOR_FILTER): vol.Coerce(
                 int
             ),

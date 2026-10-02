@@ -93,6 +93,7 @@ The thermostat can be configured for a wide variation of hardware specifications
 
 sensors (at least one sensor needs to be specified):
 * sensor (Optional): entity_id of the temperature sensor, sensor.state must be temperature (float). Not required when running in weather compensation only.
+* missing_sensor_pwm (Optional): PWM demand (0–100) used while the room sensor has no value. `0` keeps the room out of the plan. Default = 0
 * filter_mode (Optional): unscented kalman filter can be used to smoothen the temperature sensor readings. Especially usefull in case of irregular sensor updates such as battery operated devices (for instance battery operated zigbee sensor). Default = 0 (off) (see section 'sensor filter' for more details)
 * filter_resolution (Optional): sensor step in Kelvin, from the datasheet or HA history stairs (e.g. 0.2 or 0.5). Used as UKF measurement noise. Default = 0.2
 * sensor_out (Optional): entity_id for a outdoor temperature sensor, sensor_out.state must be temperature (float). Only required when running weather mode. No filtering possible.
