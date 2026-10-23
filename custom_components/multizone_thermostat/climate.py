@@ -33,7 +33,6 @@ from homeassistant.const import (
     ATTR_TEMPERATURE,
     CONF_NAME,
     CONF_UNIQUE_ID,
-    EVENT_HOMEASSISTANT_START,
     SERVICE_TURN_OFF,
     SERVICE_TURN_ON,
     STATE_CLOSED,
@@ -424,11 +423,7 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         if self.hass.state == CoreState.running:
             await self.async_startup()
             return
-        self.async_on_remove(
-            self.hass.bus.async_listen_once(
-                EVENT_HOMEASSISTANT_START, self.async_startup
-            )
-        )
+        services.track_startup(self, self.async_startup)
 
     async def async_startup(self, *_) -> None:
         """Init on startup."""

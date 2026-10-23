@@ -13,7 +13,6 @@ from homeassistant.const import (
     CONF_ENTITY_ID,
     CONF_NAME,
     CONF_UNIQUE_ID,
-    EVENT_HOMEASSISTANT_START,
     SERVICE_TURN_OFF,
     SERVICE_TURN_ON,
     STATE_OFF,
@@ -41,7 +40,7 @@ import voluptuous as vol
 import homeassistant.helpers.config_validation as cv
 
 from . import DOMAIN
-from .services import async_setup_domain_reload
+from .services import async_setup_domain_reload, track_startup
 from .circuit_plan import CircuitPlan, CircuitPlanBuilder, check_time_in_window
 from .const import (
     ATTR_ANTI_CALC_ACTIVE,
@@ -333,11 +332,7 @@ class CircuitSelect(SelectEntity, RestoreEntity):
         if self.hass.state == CoreState.running:
             await self.async_startup()
             return
-        self.async_on_remove(
-            self.hass.bus.async_listen_once(
-                EVENT_HOMEASSISTANT_START, self.async_startup
-            )
-        )
+        track_startup(self, self.async_startup)
 
     async def async_startup(self, *_) -> None:
         """Restore the circuit option and arm the first epoch."""

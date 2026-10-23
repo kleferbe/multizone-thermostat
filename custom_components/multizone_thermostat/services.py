@@ -7,7 +7,7 @@ from homeassistant.components.climate import (
     HVACMode,
 )
 from homeassistant.const import EVENT_HOMEASSISTANT_START, SERVICE_RELOAD
-from homeassistant.core import CoreState, HomeAssistant, ServiceCall
+from homeassistant.core import CoreState, HomeAssistant, ServiceCall, callback
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers.reload import async_reload_integration_platforms
 from homeassistant.helpers.service import async_register_admin_service
@@ -111,6 +111,28 @@ def register_services(custom_presets):
         },
         "async_run_stuck_prevention",
     )
+
+
+def track_startup(entity, action) -> None:
+    """Run action when HA starts. listen_once already drops its job, so remove must not unsubscribe twice."""
+    armed = True
+
+    async def _run(event) -> None:
+        nonlocal armed
+        armed = False
+        await action(event)
+
+    unsub = entity.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_START, _run)
+
+    @callback
+    def _cancel() -> None:
+        nonlocal armed
+        if not armed:
+            return
+        armed = False
+        unsub()
+
+    entity.async_on_remove(_cancel)
 
 
 def async_setup_domain_reload(hass: HomeAssistant) -> None:
