@@ -62,11 +62,10 @@ from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_interval,
 )
-from homeassistant.helpers.reload import async_setup_reload_service
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
-from . import DOMAIN, PLATFORMS, UKF_config, hvac_setting, services
+from . import DOMAIN, UKF_config, hvac_setting, services
 from .const import (
     ATTR_ANTI_CALC_ACTIVE,
     ATTR_CIRCUIT,
@@ -168,7 +167,7 @@ async def async_setup_platform(
         custom_presets.append(list(conf[CONF_EXTRA_PRESETS].keys()))
 
     custom_presets = list({key_i for list_i in custom_presets for key_i in list_i})
-    await async_setup_reload_service(hass, DOMAIN, PLATFORMS)
+    services.async_setup_domain_reload(hass)
     services.register_services(list(set(custom_presets)))
 
     async_add_entities(
@@ -419,75 +418,86 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
             )
         )
 
-        async def _async_startup(*_) -> None:
-            """Init on startup."""
-            self._logger.debug("Run start-up")
-            save_state = False
-
-            # read room temperature sensor
-            if self._sensor_entity_id:
-                sensor_state = self.hass.states.get(self._sensor_entity_id)
-            else:
-                sensor_state = None
-
-            # process room temperature
-            if sensor_state and sensor_state.state not in ERROR_STATE:
-                await self._async_update_current_temp(sensor_state.state)
-                save_state = True
-
-            # check outdoor temperature
-            if self._sensor_out_entity_id:
-                sensor_state = self.hass.states.get(self._sensor_out_entity_id)
-            else:
-                sensor_state = None
-
-            # process outdoor temperature
-            if sensor_state and sensor_state.state not in ERROR_STATE:
-                self._async_update_outdoor_temperature(sensor_state.state)
-                save_state = True
-
-            # RestoreEntity reads the previous run from its own store,
-            # not hass.states. Restore before the first HA state write.
-            if (old_state := await self.async_get_last_state()) is not None:
-                if not self._enable_old_state:
-                    if not self._hvac_mode_init:
-                        self._logger.warning(
-                            "no initial hvac mode specified: force off mode"
-                        )
-                        self._hvac_mode_init = HVACMode.OFF
-                    self._logger.info(
-                        "init default hvac mode: '%s'", self._hvac_mode_init
-                    )
-                else:
-                    self.restore_old_state(old_state)
-
-            if (
-                self._configured_master
-                and self.get_circuit() is None
-                and not self._master_missing_logged
-            ):
-                self._logger.error(
-                    "Configured circuit '%s' was not found after startup; "
-                    "'%s' runs locally",
-                    self._configured_master,
-                    self.entity_id,
-                )
-                self._master_missing_logged = True
-
-            await self.async_set_hvac_mode(self._hvac_mode_init)
-            self._startup_complete = True
-            if save_state:
-                self.async_write_ha_state()
-
+        registry = async_get_registry(self.hass)
+        if registry.reloading:
+            return
         if self.hass.state == CoreState.running:
-            await _async_startup()
+            await self.async_startup()
+            return
+        self.async_on_remove(
+            self.hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_START, self.async_startup
+            )
+        )
+
+    async def async_startup(self, *_) -> None:
+        """Init on startup."""
+        self._logger.debug("Run start-up")
+        save_state = False
+
+        # read room temperature sensor
+        if self._sensor_entity_id:
+            sensor_state = self.hass.states.get(self._sensor_entity_id)
         else:
-            self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_START, _async_startup)
+            sensor_state = None
+
+        # process room temperature
+        if sensor_state and sensor_state.state not in ERROR_STATE:
+            await self._async_update_current_temp(sensor_state.state)
+            save_state = True
+
+        # check outdoor temperature
+        if self._sensor_out_entity_id:
+            sensor_state = self.hass.states.get(self._sensor_out_entity_id)
+        else:
+            sensor_state = None
+
+        # process outdoor temperature
+        if sensor_state and sensor_state.state not in ERROR_STATE:
+            self._async_update_outdoor_temperature(sensor_state.state)
+            save_state = True
+
+        # RestoreEntity reads the previous run from its own store,
+        # not hass.states. Restore before the first HA state write.
+        if (old_state := await self.async_get_last_state()) is not None:
+            if not self._enable_old_state:
+                if not self._hvac_mode_init:
+                    self._logger.warning(
+                        "no initial hvac mode specified: force off mode"
+                    )
+                    self._hvac_mode_init = HVACMode.OFF
+                self._logger.info(
+                    "init default hvac mode: '%s'", self._hvac_mode_init
+                )
+            else:
+                self.restore_old_state(old_state)
+
+        if (
+            self._configured_master
+            and self.get_circuit() is None
+            and not self._master_missing_logged
+        ):
+            self._logger.error(
+                "Configured circuit '%s' was not found after startup; "
+                "'%s' runs locally",
+                self._configured_master,
+                self.entity_id,
+            )
+            self._master_missing_logged = True
+
+        await self.async_set_hvac_mode(self._hvac_mode_init)
+        self._startup_complete = True
+        if save_state:
+            self.async_write_ha_state()
 
     async def async_will_remove_from_hass(self) -> None:
         """Drop zone membership when the entity is unloaded."""
-        self._clear_replan_timer()
         async_get_registry(self.hass).unregister_climate(self)
+        self._clear_local_epoch_timer()
+        self._clear_replan_timer()
+        self._clear_pid_tick_timers()
+        self._clear_pwm_timers()
+        self._clear_controller_timer()
         await super().async_will_remove_from_hass()
 
     @callback
@@ -1144,7 +1154,6 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         self._controller_timer = async_track_time_interval(
             self.hass, self._on_controller_timer, interval
         )
-        self.async_on_remove(self._controller_timer)
 
     def _clear_controller_timer(self) -> None:
         if self._controller_timer is None:
@@ -1159,9 +1168,11 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         Only call emergency stop due to stale sensor, ignore invalid values
         """
         new_state = event.data.get("new_state")
+        if new_state is None:
+            return
         self._logger.debug("New sensor temperature '%s'", new_state.state)
 
-        if new_state is None or new_state.state in ERROR_STATE:
+        if new_state.state in ERROR_STATE:
             # Before the first valid reading this is the normal boot sequence
             # (unavailable → unknown). After that it means the sensor dropped out.
             self._logger.log(
@@ -1169,8 +1180,8 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
                 if self._current_temperature is not None
                 else logging.DEBUG,
                 "Sensor temperature %s invalid: %s, skip current state",
-                new_state.name if new_state else self._sensor_entity_id,
-                None if new_state is None else new_state.state,
+                new_state.name,
+                new_state.state,
             )
             return
         elif not is_float(new_state.state):
@@ -1200,8 +1211,10 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
         Only call emergency stop due to stale sensor, ignore invalid values
         """
         new_state = event.data.get("new_state")
+        if new_state is None:
+            return
         self._logger.debug("New sensor outdoor temperature '%s'", new_state.state)
-        if new_state is None or new_state.state in ERROR_STATE:
+        if new_state.state in ERROR_STATE:
             self._logger.debug(
                 "Outdoor sensor temperature %s invalid %s, skip current state",
                 new_state.name,
@@ -1251,6 +1264,8 @@ class MultiZoneThermostat(ClimateEntity, RestoreEntity):
     def _async_switches_change(self, event: Event[EventStateChangedData]) -> None:
         """Handle device switch state changes."""
         new_state = event.data.get("new_state")
+        if new_state is None:
+            return
         entity_id = event.data.get(ATTR_ENTITY_ID)
         self._logger.debug(
             "'%s' switch changed to '%s'",

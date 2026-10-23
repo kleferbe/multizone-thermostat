@@ -34,14 +34,14 @@ from homeassistant.helpers.event import (
     async_track_point_in_utc_time,
     async_track_state_change_event,
 )
-from homeassistant.helpers.reload import async_setup_reload_service
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 from homeassistant.helpers import entity_platform
 import voluptuous as vol
 import homeassistant.helpers.config_validation as cv
 
-from . import DOMAIN, PLATFORMS
+from . import DOMAIN
+from .services import async_setup_domain_reload
 from .circuit_plan import CircuitPlan, CircuitPlanBuilder, check_time_in_window
 from .const import (
     ATTR_ANTI_CALC_ACTIVE,
@@ -185,7 +185,7 @@ async def async_setup_platform(
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
     """Set up one heating-circuit Select entity."""
-    await async_setup_reload_service(hass, DOMAIN, PLATFORMS)
+    async_setup_domain_reload(hass)
     _register_services()
     async_add_entities([CircuitSelect(config)])
 
@@ -327,17 +327,25 @@ class CircuitSelect(SelectEntity, RestoreEntity):
             )
         )
 
-        async def _async_startup(*_) -> None:
-            if self._restore_old_state:
-                old_state = await self.async_get_last_state()
-                if old_state is not None and old_state.state in self._attr_options:
-                    self._attr_current_option = old_state.state
-            await self._async_apply_option(self._attr_current_option, starting=True)
-
+        registry = async_get_registry(self.hass)
+        if registry.reloading:
+            return
         if self.hass.state == CoreState.running:
-            await _async_startup()
-        else:
-            self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_START, _async_startup)
+            await self.async_startup()
+            return
+        self.async_on_remove(
+            self.hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_START, self.async_startup
+            )
+        )
+
+    async def async_startup(self, *_) -> None:
+        """Restore the circuit option and arm the first epoch."""
+        if self._restore_old_state:
+            old_state = await self.async_get_last_state()
+            if old_state is not None and old_state.state in self._attr_options:
+                self._attr_current_option = old_state.state
+        await self._async_apply_option(self._attr_current_option, starting=True)
 
     async def async_will_remove_from_hass(self) -> None:
         self._clear_epoch_timer()

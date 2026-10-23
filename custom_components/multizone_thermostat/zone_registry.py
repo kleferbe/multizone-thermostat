@@ -29,6 +29,7 @@ class ZoneRegistry:
         self.circuits: dict[str, CircuitSelect] = {}
         self.membership: dict[str, str] = {}
         self.pending: dict[str, str] = {}
+        self.reloading = False
 
     def climate(self, entity_id: str) -> MultiZoneThermostat | None:
         """Return a registered room climate."""

@@ -1,29 +1,47 @@
 import voluptuous as vol
 import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers import entity_platform
 from homeassistant.components.climate import (
     ATTR_HVAC_MODE,
     ATTR_PRESET_MODE,
     PRESET_NONE,
     HVACMode,
 )
+from homeassistant.const import EVENT_HOMEASSISTANT_START, SERVICE_RELOAD
+from homeassistant.core import CoreState, HomeAssistant, ServiceCall
+from homeassistant.helpers import entity_platform
+from homeassistant.helpers.reload import async_reload_integration_platforms
+from homeassistant.helpers.service import async_register_admin_service
 
+from . import DOMAIN, PLATFORMS
 from .const import *
+from .zone_registry import async_get_registry
 
 SUPPORTED_PRESET_MODES = [PRESET_NONE, PRESET_EMERGENCY, PRESET_RESTORE, PRESET_STANDBY]
 SUPPORTED_HVAC_MODES = [HVACMode.HEAT, HVACMode.COOL, HVACMode.OFF]
+PRESET_CHOICES = list(SUPPORTED_PRESET_MODES)
+
+
+def remember_presets(custom_presets) -> None:
+    """Add presets from the current YAML. The service schema holds this list."""
+    for preset in custom_presets:
+        if preset not in PRESET_CHOICES:
+            PRESET_CHOICES.append(preset)
+
+
+def clear_custom_presets() -> None:
+    """Drop presets from the previous YAML. Built-in modes stay."""
+    del PRESET_CHOICES[len(SUPPORTED_PRESET_MODES) :]
 
 
 def register_services(custom_presets):
+    remember_presets(custom_presets)
     platform = entity_platform.current_platform.get()
     assert platform
 
     platform.async_register_entity_service(  # type: ignore
         "set_preset_mode",
         {
-            vol.Required(ATTR_PRESET_MODE): vol.In(
-                custom_presets + SUPPORTED_PRESET_MODES
-            ),
+            vol.Required(ATTR_PRESET_MODE): vol.In(PRESET_CHOICES),
             vol.Required(ATTR_HVAC_MODE): vol.In(SUPPORTED_HVAC_MODES),
         },
         "async_set_preset_mode",
@@ -93,3 +111,38 @@ def register_services(custom_presets):
         },
         "async_run_stuck_prevention",
     )
+
+
+def async_setup_domain_reload(hass: HomeAssistant) -> None:
+    """Register multizone_thermostat.reload. Both platforms call this."""
+    if hass.services.has_service(DOMAIN, SERVICE_RELOAD):
+        return
+
+    pending_start = None
+
+    async def _async_start_registered(_event=None) -> None:
+        registry = async_get_registry(hass)
+        for circuit in list(registry.circuits.values()):
+            await circuit.async_startup()
+        for climate in list(registry.climates.values()):
+            await climate.async_startup()
+
+    async def _reload(_call: ServiceCall) -> None:
+        nonlocal pending_start
+        registry = async_get_registry(hass)
+        registry.reloading = True
+        clear_custom_presets()
+        try:
+            await async_reload_integration_platforms(hass, DOMAIN, PLATFORMS)
+        finally:
+            registry.reloading = False
+        if hass.state == CoreState.running:
+            await _async_start_registered()
+            return
+        if pending_start is not None:
+            pending_start()
+        pending_start = hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_START, _async_start_registered
+        )
+
+    async_register_admin_service(hass, DOMAIN, SERVICE_RELOAD, _reload)
